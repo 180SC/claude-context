@@ -16,6 +16,8 @@
  *   --repo URL      — GitHub repo URL to link to the project (default: github.com/180SC/claude-context)
  */
 
+import { execSync } from "node:child_process";
+
 const API_URL = "https://api.linear.app/graphql";
 
 // ---------------------------------------------------------------------------
@@ -43,20 +45,43 @@ if (!API_KEY) {
 // GraphQL helper
 // ---------------------------------------------------------------------------
 async function gql(query, variables = {}) {
-  const res = await fetch(API_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: API_KEY,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-  const json = await res.json();
-  if (json.errors) {
-    console.error("GraphQL errors:", JSON.stringify(json.errors, null, 2));
-    throw new Error(json.errors[0].message);
+  const payload = JSON.stringify({ query, variables });
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = execSync(
+        `curl -sS -X POST "${API_URL}" -H "Content-Type: application/json" -H "Authorization: ${API_KEY}" -d @-`,
+        { input: payload, encoding: "utf-8", timeout: 30000 }
+      );
+      const trimmed = result.trim();
+      let json;
+      try {
+        json = JSON.parse(trimmed);
+      } catch (parseErr) {
+        if (attempt < maxRetries) {
+          console.warn(`  [Retry ${attempt}/${maxRetries}] Non-JSON response, retrying in ${attempt * 2}s...`);
+          execSync(`sleep ${attempt * 2}`);
+          continue;
+        }
+        throw new Error(`Non-JSON response from Linear API: ${trimmed.substring(0, 200)}`);
+      }
+      if (json.errors) {
+        // Don't retry permanent GraphQL errors (validation, auth, etc.)
+        console.error("GraphQL errors:", JSON.stringify(json.errors, null, 2));
+        const err = new Error(json.errors[0].message);
+        err.isGraphQL = true;
+        throw err;
+      }
+      return json.data;
+    } catch (err) {
+      if (attempt < maxRetries && !err.isGraphQL) {
+        console.warn(`  [Retry ${attempt}/${maxRetries}] ${err.message}, retrying in ${attempt * 2}s...`);
+        execSync(`sleep ${attempt * 2}`);
+        continue;
+      }
+      throw err;
+    }
   }
-  return json.data;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +118,7 @@ async function resolveAssignee() {
 
 async function getWorkflowStates(teamId) {
   const data = await gql(
-    `query($teamId: String!) {
+    `query($teamId: ID!) {
       workflowStates(filter: { team: { id: { eq: $teamId } } }) {
         nodes { id name type }
       }
@@ -107,6 +132,16 @@ async function getWorkflowStates(teamId) {
 // Create helpers
 // ---------------------------------------------------------------------------
 async function createProject(name, description, teamIds) {
+  // Check if project already exists (from a previous partial run)
+  const existing = await gql(
+    `query { projects { nodes { id name url slugId } } }`
+  );
+  const found = existing.projects.nodes.find((p) => p.name === name);
+  if (found) {
+    console.log(`  Found existing project: ${found.name}`);
+    return found;
+  }
+
   const data = await gql(
     `mutation($input: ProjectCreateInput!) {
       projectCreate(input: $input) {
@@ -126,28 +161,42 @@ async function createProject(name, description, teamIds) {
 }
 
 async function createLabel(teamId, name, color, description) {
-  // Check if label already exists
+  // Check if label already exists (workspace-level)
   const existing = await gql(
-    `query($teamId: String!) {
-      issueLabels(filter: { team: { id: { eq: $teamId } } }) {
+    `query {
+      issueLabels {
         nodes { id name }
       }
-    }`,
-    { teamId }
+    }`
   );
   const found = existing.issueLabels.nodes.find((l) => l.name === name);
   if (found) return found;
 
-  const data = await gql(
-    `mutation($input: IssueLabelCreateInput!) {
-      issueLabelCreate(input: $input) {
-        success
-        issueLabel { id name }
-      }
-    }`,
-    { input: { teamId, name, color, description } }
-  );
-  return data.issueLabelCreate.issueLabel;
+  // Try workspace-level label first (no teamId), fall back to team-level
+  try {
+    const data = await gql(
+      `mutation($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
+          success
+          issueLabel { id name }
+        }
+      }`,
+      { input: { name, color, description } }
+    );
+    return data.issueLabelCreate.issueLabel;
+  } catch (err) {
+    // Fall back to team-level label
+    const data = await gql(
+      `mutation($input: IssueLabelCreateInput!) {
+        issueLabelCreate(input: $input) {
+          success
+          issueLabel { id name }
+        }
+      }`,
+      { input: { teamId, name, color, description } }
+    );
+    return data.issueLabelCreate.issueLabel;
+  }
 }
 
 async function createIssue(input) {
@@ -992,13 +1041,7 @@ async function main() {
   console.log("\nCreating project...");
   const project = await createProject(
     "General-Purpose Code Search MCP Server",
-    [
-      "Transform claude-context from a local-filesystem-coupled MCP server into a network-accessible,",
-      "multi-repo code search and intelligence platform. Enables any AI tool to ask 'how did I build X?'",
-      "and get results from any indexed repo.\n\n",
-      `GitHub: ${REPO_URL}\n`,
-      "See: docs/project-plan-general-purpose-code-search-mcp.md for full spec.",
-    ].join(" "),
+    `Network-accessible, multi-repo code search & intelligence MCP server. GitHub: ${REPO_URL}`,
     [team.id]
   );
   console.log(`  Project: ${project.name} (${project.url})`);
