@@ -31,13 +31,87 @@ A **network-accessible MCP server** that:
 
 ## Main User Story
 
-> **As a developer who writes code across many repositories, I want a single code search MCP server that any of my AI tools — Claude Code locally, remote LLMs over Streamable HTTP, and autonomous agents like Agno running on a schedule — can query to search, analyze, and continuously improve my codebases, without me needing to configure each repo path individually or accidentally indexing the same repo twice across worktrees and clones.**
+> **As a developer who builds across many repositories, I keep getting lost in work I've already done. I want a single code search server that lets me — or any AI tool I use — ask plain-language questions like "how did I build the Makefile help menu?" or "how am I doing OAuth with Python on Modal?" and get back the actual code from whichever repo it lives in, without me needing to remember where anything is.**
 
-### Narrative: A Day Using the System
+### The Problem
 
-#### Morning — Same as Today (No Regression)
+I have dozens of repos. Some are on GitHub, some are local experiments. Many have worktrees for parallel feature work. I've solved problems before — OAuth flows, CI pipelines, Makefile patterns, deployment scripts, API pagination — but when I need to reuse or reference that work, I can't find it. I end up:
 
-I open my terminal and start working in `~/code/my-api`. Claude Code is configured with `claude-context` as an MCP server via stdio, exactly as it is today. I ask it to index my project and search for how I handle authentication. It works identically to the current system — `index_codebase` with a local path, `search_code` with a natural language query. Nothing has changed for this workflow. My existing indexed collections are still intact; no re-indexing was required after upgrading.
+- Grepping across directories and getting buried in noise
+- Opening repo after repo in my editor trying to remember which one had the thing
+- Re-solving problems I've already solved because I can't locate the original
+- Asking an LLM to help, but it doesn't know about *my* code — only generic patterns
+
+What I need is a **searchable memory of all my code** that any tool I use can tap into.
+
+### What "Done" Looks Like
+
+I can sit down at any of my AI tools and ask questions about my own code in plain language. The system finds the answer regardless of which repo it's in, and it never creates duplicate indexes when I have multiple checkouts or worktrees of the same repo.
+
+#### Scenario 1: "How did I build that?" — Searching My Own Work
+
+I'm building a new CLI tool and want a `make help` target that auto-generates help text from Makefile comments. I know I did this before, but I don't remember where.
+
+I ask any connected LLM:
+
+> *"Tell me how I'm building the Makefile help menu"*
+
+The LLM calls `search_all` with that query. The server fans out across all my indexed repos and returns:
+
+```
+── infra-tools/Makefile (lines 45-62) ──────────────────────────
+## help: Show this help message
+.PHONY: help
+help:
+	@echo "Available targets:"
+	@grep -E '^##' $(MAKEFILE_LIST) | sed 's/^## /  /'
+
+── deploy-scripts/Makefile (lines 12-28) ───────────────────────
+# Self-documenting Makefile - prints targets with descriptions
+.DEFAULT_GOAL := help
+help: ## Display this help
+	@awk 'BEGIN {FS = ":.*##"} /^[a-zA-Z_-]+:.*##/ \
+	  {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+```
+
+Two different approaches from two different repos, found instantly. I pick the one I like, adapt it, and move on.
+
+Another day, I'm setting up a new Python service on Modal and I can't remember how I wired up OAuth last time:
+
+> *"How am I building OAuth with Python using Modal?"*
+
+```
+── modal-auth-service/auth/oauth.py (lines 15-78) ──────────────
+@app.function(secrets=[modal.Secret.from_name("oauth-creds")])
+def oauth_callback(code: str, state: str):
+    token = exchange_code_for_token(code, provider="google")
+    user = get_or_create_user(token)
+    return create_session_jwt(user)
+
+── modal-auth-service/auth/providers.py (lines 1-34) ───────────
+OAUTH_PROVIDERS = {
+    "google": {"authorize_url": "...", "token_url": "...", "scopes": [...]},
+    "github": {"authorize_url": "...", "token_url": "...", "scopes": [...]},
+}
+```
+
+My past work, found by meaning — not by filename or grep pattern.
+
+More examples of the kinds of questions this answers:
+
+- *"Show me how I set up database migrations"*
+- *"How am I handling retry logic with exponential backoff?"*
+- *"What's my pattern for structuring FastAPI routers?"*
+- *"Where do I configure CORS headers?"*
+- *"How did I set up the GitHub Actions workflow for Docker builds?"*
+- *"Show me how I'm doing WebSocket authentication"*
+- *"What testing patterns am I using for async Python code?"*
+
+Every one of these is a question about *my own code* that today requires me to remember which repo, which file, which directory. With the server, I just ask.
+
+#### Scenario 2: Same as Today — No Regression
+
+Everything that works today keeps working identically. I open my terminal, start working in `~/code/my-api`. Claude Code is configured with `claude-context` as an MCP server via stdio, exactly as it is now. I ask it to index my project and search for how I handle authentication. `index_codebase` with a local path, `search_code` with a natural language query. No changes needed to any existing configuration.
 
 ```
 Claude Code (stdio) ──► claude-context MCP (stdio transport)
@@ -46,19 +120,23 @@ Claude Code (stdio) ──► claude-context MCP (stdio transport)
                          Milvus/Zilliz Cloud
 ```
 
-#### Mid-Morning — Worktrees Just Work
+My existing indexed collections are intact. No re-indexing required after upgrading. Every existing client configuration — Claude Code, Cursor, Cline, VS Code — continues to work without modification.
 
-I switch to `~/code/my-api-hotfix`, which is a git worktree of the same repository. I ask Claude Code to index this directory. Instead of creating a duplicate collection, the server detects that this path shares the same git origin (`github.com/me/my-api`) and recognizes it as the same repository. It tells me the index already exists and registers this path as an alias. If the worktree has divergent files (it's a different branch), it incrementally indexes only the differences, tagged by branch name. When I search, I can optionally filter by branch or search across all branches.
+#### Scenario 3: Worktrees Just Work
 
-#### Afternoon — Remote LLM Access via Streamable HTTP
+I switch to `~/code/my-api-hotfix`, a git worktree of the same repository. I ask Claude Code to index this directory. Instead of creating a duplicate collection, the server detects that this path shares the same git origin (`github.com/me/my-api`) and recognizes it as the same repo. It tells me the index already exists and registers this path as an alias. If the worktree has divergent files (different branch), it incrementally indexes only the differences, tagged by branch. When I search, I can optionally filter by branch or search across all branches.
 
-I'm working in a different environment — maybe a Jupyter notebook, a custom tool, or a browser-based AI chat. I don't have Claude Code running locally, but my code search server is running on my dev machine (or a server) with Streamable HTTP enabled:
+This also means I stop wasting Milvus collection quota on duplicates. Ten worktrees of the same repo = one collection, not ten.
+
+#### Scenario 4: Streamable HTTP — Access from Anywhere
+
+I'm working in a different environment — a Jupyter notebook, a custom tool, a browser-based AI chat, or a different machine entirely. My code search server is running with Streamable HTTP enabled:
 
 ```bash
 npx @zilliz/claude-context-mcp --transport http --port 3100
 ```
 
-From any MCP-compatible client, I connect to `http://my-machine:3100/mcp` with my bearer token and invoke the same tools: `search_code`, `search_all`, `list_repositories`. The server is the single source of truth for all my indexed code, accessible from anywhere.
+From any MCP-compatible client, I connect to `http://my-machine:3100/mcp` with my bearer token and ask the same questions. The server is the single source of truth for all my indexed code.
 
 ```
 Any LLM Client ──► HTTP/SSE (Streamable HTTP) ──► claude-context MCP
@@ -67,21 +145,17 @@ Any LLM Client ──► HTTP/SSE (Streamable HTTP) ──► claude-context MCP
                                                    Milvus/Zilliz Cloud
 ```
 
-I can also run both transports simultaneously — stdio for my local Claude Code session and HTTP for everything else:
+I can run both transports simultaneously — stdio for my local Claude Code session and HTTP for everything else:
 
 ```bash
 npx @zilliz/claude-context-mcp --transport both --port 3100
 ```
 
-#### Afternoon — Cross-Repo Search
+This is how autonomous agents and remote tools connect. The stdio path stays for local use; HTTP opens the server up to everything else.
 
-I've indexed 8 repositories: `my-api`, `my-frontend`, `my-shared-lib`, `my-cli`, and several internal tools. I ask an LLM: *"How do I handle errors across all my projects?"* It calls `search_all` with that query and gets ranked results spanning every indexed repo. The results show me that `my-api` uses a custom `AppError` class, `my-frontend` uses React error boundaries, and `my-cli` mostly uses `process.exit(1)` with console errors. I can see patterns across my entire codebase portfolio in a single query.
+#### Scenario 5: Autonomous Agents — Continuous Improvement
 
-I can also ask specifically about patterns: *"What logging patterns am I using?"* via `find_patterns`, and get back grouped results showing that 5 of my repos use `winston`, 2 use `pino`, and 1 uses raw `console.log` — with representative code snippets and file counts for each.
-
-#### Evening — Autonomous Agents Run Continuously
-
-I've set up an Agno agent that connects to the same MCP server over Streamable HTTP and runs on a schedule (cron, every night). Its job is to continuously review my code and file improvement suggestions.
+I set up an Agno agent that connects to the same MCP server over Streamable HTTP. It runs on a schedule (cron, nightly) and its job is to continuously review my code and surface improvements.
 
 ```python
 from agno.agent import Agent
@@ -110,26 +184,27 @@ reviewer = Agent(
 reviewer.run("Review all repositories and produce improvement report")
 ```
 
-When I check in the morning, the agent has produced a report:
+In the morning, the agent has produced a report:
 - `my-api`: 3 endpoints missing input validation, 2 SQL queries using string concatenation
 - `my-frontend`: 14 components without error boundaries, test coverage dropped below 60%
-- `my-shared-lib`: unused exports detected in 4 modules, circular dependency between `utils/` and `core/`
+- `my-shared-lib`: unused exports in 4 modules, circular dependency between `utils/` and `core/`
 
-The agent didn't just search — it used `audit_practices`, `find_patterns`, and `map_architecture` to produce actionable findings. And because it runs nightly, it tracks trends: *"Input validation coverage improved from 72% to 89% this week."*
+Because it runs nightly, it tracks trends: *"Input validation coverage improved from 72% to 89% this week."*
 
-Other autonomous agent use cases:
+Other autonomous agent scenarios:
 - **Onboarding agent**: New team members ask it to explain how any part of the codebase works, and it retrieves relevant code across repos with full context
 - **PR review agent**: On every PR, an agent queries the server to find similar patterns elsewhere in the codebase and flags inconsistencies
 - **Documentation agent**: Periodically scans for undocumented public APIs and drafts doc stubs
 - **Dependency audit agent**: Checks for outdated patterns, deprecated API usage, or inconsistent dependency versions across repos
+- **"How do I..." agent**: A team Slack bot backed by Agno that anyone can ask *"how do we handle X?"* and it searches the org's indexed code to answer with real examples
 
 ### Interaction Modes Summary
 
 | Mode | Transport | Client Examples | Use Case |
 |------|-----------|-----------------|----------|
 | **Local (current)** | stdio | Claude Code, Cursor, Cline, VS Code | Developer at their terminal, working in a single repo — identical to today |
-| **Remote interactive** | Streamable HTTP | Any MCP client, Jupyter, browser tools, Claude Desktop (remote) | Developer accessing code search from a different machine or environment |
-| **Autonomous agent** | Streamable HTTP | Agno, LangChain agents, custom scripts | Scheduled/continuous code review, improvement tracking, onboarding assistance |
+| **Remote interactive** | Streamable HTTP | Any MCP client, Jupyter, browser tools, Claude Desktop (remote) | Developer asking questions about their code from a different machine or environment |
+| **Autonomous agent** | Streamable HTTP | Agno, LangChain agents, custom scripts | Scheduled/continuous code review, improvement tracking, team knowledge base |
 | **Both** | stdio + HTTP | All of the above simultaneously | Full setup — local + remote + agents all hitting the same server and index |
 
 ### Tool Inventory (Complete)
@@ -140,7 +215,7 @@ Other autonomous agent use cases:
 | `search_code` | Yes | Semantic search within a single repository. |
 | `clear_index` | Yes | Delete the search index for a repository. |
 | `get_indexing_status` | Yes | Check indexing progress. |
-| `search_all` | New | Search across all indexed repositories simultaneously. |
+| `search_all` | New | Search across all indexed repositories. The primary tool for "how did I build X?" questions. |
 | `list_repositories` | New | List all known repos with metadata, worktree relationships, and index status. |
 | `discover_repositories` | New | Scan configured directories for git repos and register them. |
 | `find_patterns` | New | Identify recurring code patterns by category across repos. |
