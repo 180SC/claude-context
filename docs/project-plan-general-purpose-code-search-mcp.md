@@ -29,6 +29,138 @@ A **network-accessible MCP server** that:
 
 ---
 
+## Main User Story
+
+> **As a developer who writes code across many repositories, I want a single code search MCP server that any of my AI tools — Claude Code locally, remote LLMs over Streamable HTTP, and autonomous agents like Agno running on a schedule — can query to search, analyze, and continuously improve my codebases, without me needing to configure each repo path individually or accidentally indexing the same repo twice across worktrees and clones.**
+
+### Narrative: A Day Using the System
+
+#### Morning — Same as Today (No Regression)
+
+I open my terminal and start working in `~/code/my-api`. Claude Code is configured with `claude-context` as an MCP server via stdio, exactly as it is today. I ask it to index my project and search for how I handle authentication. It works identically to the current system — `index_codebase` with a local path, `search_code` with a natural language query. Nothing has changed for this workflow. My existing indexed collections are still intact; no re-indexing was required after upgrading.
+
+```
+Claude Code (stdio) ──► claude-context MCP (stdio transport)
+                              │
+                              ▼
+                         Milvus/Zilliz Cloud
+```
+
+#### Mid-Morning — Worktrees Just Work
+
+I switch to `~/code/my-api-hotfix`, which is a git worktree of the same repository. I ask Claude Code to index this directory. Instead of creating a duplicate collection, the server detects that this path shares the same git origin (`github.com/me/my-api`) and recognizes it as the same repository. It tells me the index already exists and registers this path as an alias. If the worktree has divergent files (it's a different branch), it incrementally indexes only the differences, tagged by branch name. When I search, I can optionally filter by branch or search across all branches.
+
+#### Afternoon — Remote LLM Access via Streamable HTTP
+
+I'm working in a different environment — maybe a Jupyter notebook, a custom tool, or a browser-based AI chat. I don't have Claude Code running locally, but my code search server is running on my dev machine (or a server) with Streamable HTTP enabled:
+
+```bash
+npx @zilliz/claude-context-mcp --transport http --port 3100
+```
+
+From any MCP-compatible client, I connect to `http://my-machine:3100/mcp` with my bearer token and invoke the same tools: `search_code`, `search_all`, `list_repositories`. The server is the single source of truth for all my indexed code, accessible from anywhere.
+
+```
+Any LLM Client ──► HTTP/SSE (Streamable HTTP) ──► claude-context MCP
+                                                        │
+                                                        ▼
+                                                   Milvus/Zilliz Cloud
+```
+
+I can also run both transports simultaneously — stdio for my local Claude Code session and HTTP for everything else:
+
+```bash
+npx @zilliz/claude-context-mcp --transport both --port 3100
+```
+
+#### Afternoon — Cross-Repo Search
+
+I've indexed 8 repositories: `my-api`, `my-frontend`, `my-shared-lib`, `my-cli`, and several internal tools. I ask an LLM: *"How do I handle errors across all my projects?"* It calls `search_all` with that query and gets ranked results spanning every indexed repo. The results show me that `my-api` uses a custom `AppError` class, `my-frontend` uses React error boundaries, and `my-cli` mostly uses `process.exit(1)` with console errors. I can see patterns across my entire codebase portfolio in a single query.
+
+I can also ask specifically about patterns: *"What logging patterns am I using?"* via `find_patterns`, and get back grouped results showing that 5 of my repos use `winston`, 2 use `pino`, and 1 uses raw `console.log` — with representative code snippets and file counts for each.
+
+#### Evening — Autonomous Agents Run Continuously
+
+I've set up an Agno agent that connects to the same MCP server over Streamable HTTP and runs on a schedule (cron, every night). Its job is to continuously review my code and file improvement suggestions.
+
+```python
+from agno.agent import Agent
+from agno.tools.mcp import MCPTools
+
+code_search = MCPTools(
+    transport="streamable-http",
+    url="http://localhost:3100/mcp",
+    headers={"Authorization": "Bearer my-token"}
+)
+
+reviewer = Agent(
+    model=Claude(...),
+    tools=[code_search],
+    instructions="""
+    You are a code quality reviewer. Each run:
+    1. Call list_repositories to see all indexed repos
+    2. Call search_all to find error handling, logging, and test patterns
+    3. Call audit_practices for each repo with focus on security and testing
+    4. Produce a structured report of findings and improvement suggestions
+    5. Compare against last run's findings to track progress
+    """
+)
+
+# Runs nightly via cron / Agno Workflow scheduler
+reviewer.run("Review all repositories and produce improvement report")
+```
+
+When I check in the morning, the agent has produced a report:
+- `my-api`: 3 endpoints missing input validation, 2 SQL queries using string concatenation
+- `my-frontend`: 14 components without error boundaries, test coverage dropped below 60%
+- `my-shared-lib`: unused exports detected in 4 modules, circular dependency between `utils/` and `core/`
+
+The agent didn't just search — it used `audit_practices`, `find_patterns`, and `map_architecture` to produce actionable findings. And because it runs nightly, it tracks trends: *"Input validation coverage improved from 72% to 89% this week."*
+
+Other autonomous agent use cases:
+- **Onboarding agent**: New team members ask it to explain how any part of the codebase works, and it retrieves relevant code across repos with full context
+- **PR review agent**: On every PR, an agent queries the server to find similar patterns elsewhere in the codebase and flags inconsistencies
+- **Documentation agent**: Periodically scans for undocumented public APIs and drafts doc stubs
+- **Dependency audit agent**: Checks for outdated patterns, deprecated API usage, or inconsistent dependency versions across repos
+
+### Interaction Modes Summary
+
+| Mode | Transport | Client Examples | Use Case |
+|------|-----------|-----------------|----------|
+| **Local (current)** | stdio | Claude Code, Cursor, Cline, VS Code | Developer at their terminal, working in a single repo — identical to today |
+| **Remote interactive** | Streamable HTTP | Any MCP client, Jupyter, browser tools, Claude Desktop (remote) | Developer accessing code search from a different machine or environment |
+| **Autonomous agent** | Streamable HTTP | Agno, LangChain agents, custom scripts | Scheduled/continuous code review, improvement tracking, onboarding assistance |
+| **Both** | stdio + HTTP | All of the above simultaneously | Full setup — local + remote + agents all hitting the same server and index |
+
+### Tool Inventory (Complete)
+
+| Tool | Exists Today | Description |
+|------|:---:|-------------|
+| `index_codebase` | Yes | Index a local directory or remote git URL. Detects repo identity, deduplicates worktrees. |
+| `search_code` | Yes | Semantic search within a single repository. |
+| `clear_index` | Yes | Delete the search index for a repository. |
+| `get_indexing_status` | Yes | Check indexing progress. |
+| `search_all` | New | Search across all indexed repositories simultaneously. |
+| `list_repositories` | New | List all known repos with metadata, worktree relationships, and index status. |
+| `discover_repositories` | New | Scan configured directories for git repos and register them. |
+| `find_patterns` | New | Identify recurring code patterns by category across repos. |
+| `audit_practices` | New | Compare codebase against best practices; produce findings report. |
+| `map_architecture` | New | Produce dependency graph and architectural overview for a repo. |
+| `find_usages` | New | Find all usages of a symbol across repositories. |
+
+### Non-Functional Requirements
+
+| Requirement | Detail |
+|-------------|--------|
+| **Zero regression** | All existing stdio-based workflows work identically after upgrade. Existing Milvus collections are preserved. Existing Claude Code / Cursor / Cline configurations require zero changes. |
+| **Backward-compatible data** | v1/v2 snapshots auto-migrate to v3 on first load. Old collections are queryable without re-indexing. |
+| **Security** | HTTP transport requires bearer token auth. No auth on stdio (local trust). Rate limiting on HTTP. Audit log for all tool invocations. |
+| **Performance** | Cross-repo search across 20 repos completes in < 5 seconds. Single-repo search performance unchanged from today. |
+| **Observability** | Structured JSON logging option. Health check endpoint. Index status queryable by any client. |
+| **Deployment** | Single binary/npm package. Docker image available. Can run as systemd service, Docker container, or ad-hoc process. |
+
+---
+
 ## Epic 1: Repository Identity & Worktree Reconciliation
 
 **Goal:** Replace path-based identity with git-aware canonical repository identity so that multiple worktrees, clones, or checkouts of the same repo share a single index.
