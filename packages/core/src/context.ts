@@ -22,6 +22,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { FileSynchronizer } from './sync/synchronizer';
+import {
+    CollectionMigrator,
+    CollectionNameResolution,
+    generateLegacyCollectionName,
+    generateCanonicalCollectionName,
+} from './identity/collection-migrator';
+import { resolveIdentity, RepoIdentity } from './identity/repo-identity';
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -103,6 +110,8 @@ export class Context {
     private supportedExtensions: string[];
     private ignorePatterns: string[];
     private synchronizers = new Map<string, FileSynchronizer>();
+    private collectionMigrator: CollectionMigrator | null = null;
+    private migratorInitialized: boolean = false;
 
     constructor(config: ContextConfig = {}) {
         // Initialize services
@@ -230,6 +239,7 @@ export class Context {
 
     /**
      * Generate collection name based on codebase path and hybrid mode
+     * @deprecated Use resolveCollectionName() for canonical-identity-based naming with legacy fallback
      */
     public getCollectionName(codebasePath: string): string {
         const isHybrid = this.getIsHybrid();
@@ -237,6 +247,111 @@ export class Context {
         const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
         const prefix = isHybrid === true ? 'hybrid_code_chunks' : 'code_chunks';
         return `${prefix}_${hash.substring(0, 8)}`;
+    }
+
+    /**
+     * Initialize the collection migrator by loading existing collections.
+     * This should be called once on startup before using resolveCollectionName().
+     */
+    public async initializeCollectionMigrator(): Promise<void> {
+        if (this.migratorInitialized) {
+            return;
+        }
+
+        console.log('[Context] 🔧 Initializing collection migrator...');
+        this.collectionMigrator = new CollectionMigrator();
+
+        // Load existing collections from vector database
+        const existingCollections = await this.vectorDatabase.listCollections();
+        this.collectionMigrator.setExistingCollections(existingCollections);
+
+        this.migratorInitialized = true;
+        console.log(`[Context] ✅ Collection migrator initialized with ${existingCollections.length} existing collections`);
+    }
+
+    /**
+     * Resolve collection name with canonical-identity-based naming and legacy fallback.
+     *
+     * Strategy:
+     * 1. If a legacy (8-char path hash) collection exists for this path, use it (backward compat)
+     * 2. If no legacy collection exists, use canonical-ID-based name (12-char hash)
+     *
+     * This method requires initializeCollectionMigrator() to be called first.
+     * If the migrator is not initialized, falls back to legacy getCollectionName().
+     *
+     * @param codebasePath Codebase root path
+     * @returns Collection name resolution with metadata
+     */
+    public resolveCollectionName(codebasePath: string): CollectionNameResolution {
+        const isHybrid = this.getIsHybrid();
+
+        // If migrator not initialized, use legacy naming
+        if (!this.collectionMigrator) {
+            const legacyName = this.getCollectionName(codebasePath);
+            return {
+                collectionName: legacyName,
+                isLegacy: true,
+                legacyName,
+            };
+        }
+
+        return this.collectionMigrator.resolveCollectionName(codebasePath, isHybrid);
+    }
+
+    /**
+     * Resolve collection name asynchronously, initializing the migrator if needed.
+     * This is the preferred method for resolving collection names.
+     *
+     * @param codebasePath Codebase root path
+     * @returns Collection name resolution with metadata
+     */
+    public async resolveCollectionNameAsync(codebasePath: string): Promise<CollectionNameResolution> {
+        // Initialize migrator if not done
+        if (!this.migratorInitialized) {
+            await this.initializeCollectionMigrator();
+        }
+
+        return this.resolveCollectionName(codebasePath);
+    }
+
+    /**
+     * Get the repository identity for a codebase path.
+     *
+     * @param codebasePath Codebase root path
+     * @returns Repository identity information
+     */
+    public getRepoIdentity(codebasePath: string): RepoIdentity {
+        return resolveIdentity(codebasePath);
+    }
+
+    /**
+     * Get the collection migrator instance (for advanced usage).
+     */
+    public getCollectionMigrator(): CollectionMigrator | null {
+        return this.collectionMigrator;
+    }
+
+    /**
+     * Check if the collection migrator is initialized.
+     */
+    public isCollectionMigratorInitialized(): boolean {
+        return this.migratorInitialized;
+    }
+
+    /**
+     * Notify the migrator that a collection was created.
+     * Call this after creating a new collection.
+     */
+    public notifyCollectionCreated(collectionName: string): void {
+        this.collectionMigrator?.addCollection(collectionName);
+    }
+
+    /**
+     * Notify the migrator that a collection was dropped.
+     * Call this after dropping a collection.
+     */
+    public notifyCollectionDropped(collectionName: string): void {
+        this.collectionMigrator?.removeCollection(collectionName);
     }
 
     /**
@@ -545,6 +660,7 @@ export class Context {
 
         if (collectionExists) {
             await this.vectorDatabase.dropCollection(collectionName);
+            this.notifyCollectionDropped(collectionName);
         }
 
         // Delete snapshot file
@@ -639,6 +755,7 @@ export class Context {
         if (collectionExists && forceReindex) {
             console.log(`[Context] 🗑️  Dropping existing collection ${collectionName} for force reindex...`);
             await this.vectorDatabase.dropCollection(collectionName);
+            this.notifyCollectionDropped(collectionName);
             console.log(`[Context] ✅ Collection ${collectionName} dropped successfully`);
         }
 
@@ -653,6 +770,7 @@ export class Context {
             await this.vectorDatabase.createCollection(collectionName, dimension, `Index for ${dirName}`);
         }
 
+        this.notifyCollectionCreated(collectionName);
         console.log(`[Context] ✅ Collection ${collectionName} created successfully (dimension: ${dimension})`);
     }
 

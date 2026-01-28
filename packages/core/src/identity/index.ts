@@ -19,3 +19,4 @@
 
 export * from './repo-identity';
 export * from './git-utils';
+export * from './collection-migrator';
