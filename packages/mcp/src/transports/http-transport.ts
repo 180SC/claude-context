@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { AuthMiddleware, RateLimiter } from '../middleware/index.js';
 
 export interface HttpTransportOptions {
   /** Port to listen on (default: 3100) */
@@ -18,6 +19,10 @@ export interface HttpTransportOptions {
   mcpServer: Server;
   /** Server version for health endpoint */
   version: string;
+  /** Bearer token for authentication (required for secure access) */
+  authToken?: string;
+  /** Requests per minute rate limit (default: 60) */
+  rateLimit?: number;
 }
 
 export interface HttpTransportInfo {
@@ -31,6 +36,8 @@ export interface HttpTransportInfo {
  * HTTP transport wrapper that provides:
  * - Streamable HTTP transport on /mcp endpoint
  * - Health check on /health endpoint
+ * - Bearer token authentication
+ * - Rate limiting per client IP
  * - CORS support
  */
 export class HttpTransport {
@@ -41,6 +48,8 @@ export class HttpTransport {
   private corsOrigin: string;
   private version: string;
   private startTime: Date;
+  private authMiddleware: AuthMiddleware | null;
+  private rateLimiter: RateLimiter;
 
   constructor(options: HttpTransportOptions) {
     this.port = options.port;
@@ -48,6 +57,25 @@ export class HttpTransport {
     this.mcpServer = options.mcpServer;
     this.version = options.version;
     this.startTime = new Date();
+
+    // Initialize authentication middleware if token is provided
+    if (options.authToken) {
+      this.authMiddleware = new AuthMiddleware({
+        token: options.authToken,
+        excludePaths: ['/health'],
+      });
+      console.log('[HTTP] Authentication enabled');
+    } else {
+      this.authMiddleware = null;
+      console.log('[HTTP] Authentication disabled (no MCP_AUTH_TOKEN)');
+    }
+
+    // Initialize rate limiter
+    this.rateLimiter = new RateLimiter({
+      requestsPerMinute: options.rateLimit,
+      excludePaths: ['/health'],
+    });
+    console.log(`[HTTP] Rate limiting enabled: ${this.rateLimiter.limit} requests/minute`);
 
     this.server = http.createServer(async (req, res) => {
       // Set CORS headers for all responses
@@ -63,12 +91,35 @@ export class HttpTransport {
       }
 
       const url = new URL(req.url ?? '/', `http://localhost:${this.port}`);
+      const clientIp = AuthMiddleware.getClientIp(req);
 
       try {
+        // Apply authentication middleware (except for excluded paths)
+        if (this.authMiddleware?.requiresAuth(url.pathname)) {
+          const authResult = this.authMiddleware.authenticate(req);
+          if (!authResult.authenticated) {
+            console.log(`[HTTP] [AUDIT] Auth failed from ${clientIp} for ${url.pathname}: ${authResult.error}`);
+            this.authMiddleware.handleUnauthorized(res, authResult);
+            return;
+          }
+        }
+
+        // Apply rate limiting (except for excluded paths)
+        if (this.rateLimiter.shouldLimit(url.pathname)) {
+          const rateLimitResult = this.rateLimiter.check(clientIp);
+          this.rateLimiter.addHeaders(res, rateLimitResult);
+
+          if (!rateLimitResult.allowed) {
+            console.log(`[HTTP] [AUDIT] Rate limit exceeded for ${clientIp}`);
+            this.rateLimiter.handleLimited(res, rateLimitResult);
+            return;
+          }
+        }
+
         if (url.pathname === '/health') {
           await this.handleHealthCheck(req, res);
         } else if (url.pathname === '/mcp') {
-          await this.handleMcpRequest(req, res);
+          await this.handleMcpRequest(req, res, clientIp);
         } else {
           res.writeHead(404, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'Not Found' }));
@@ -109,8 +160,8 @@ export class HttpTransport {
   /**
    * Handle MCP requests on the /mcp endpoint
    */
-  private async handleMcpRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    console.log(`[HTTP] Received ${req.method} request to /mcp`);
+  private async handleMcpRequest(req: http.IncomingMessage, res: http.ServerResponse, clientIp: string): Promise<void> {
+    console.log(`[HTTP] [AUDIT] ${new Date().toISOString()} | ${clientIp} | ${req.method} /mcp`);
 
     // Parse request body for POST requests
     let body: unknown = undefined;

@@ -32,6 +32,7 @@ import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
 import { HttpTransport } from "./transports/http-transport.js";
+import { validateAuthToken } from "./middleware/auth.js";
 
 // CLI options
 interface CliOptions {
@@ -312,11 +313,15 @@ This tool is versatile and can be used before completing various tasks to retrie
 
         // Start HTTP transport if requested
         if (useHttp) {
+            // Validate authentication token is set for HTTP transport
+            const authToken = validateAuthToken(cliOptions.transport);
+
             console.log(`[HTTP] Starting HTTP transport on port ${cliOptions.port}...`);
             this.httpTransport = new HttpTransport({
                 port: cliOptions.port,
                 mcpServer: this.server,
                 version: this.version,
+                authToken: authToken ?? undefined,
             });
             await this.httpTransport.start();
         }
