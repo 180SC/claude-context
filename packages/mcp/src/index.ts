@@ -15,6 +15,7 @@ console.warn = (...args: any[]) => {
 
 // console.error already goes to stderr by default
 
+import { parseArgs } from "node:util";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -30,6 +31,49 @@ import { createEmbeddingInstance, logEmbeddingProviderInfo } from "./embedding.j
 import { SnapshotManager } from "./snapshot.js";
 import { SyncManager } from "./sync.js";
 import { ToolHandlers } from "./handlers.js";
+import { HttpTransport } from "./transports/http-transport.js";
+
+// CLI options
+interface CliOptions {
+    transport: 'stdio' | 'http' | 'both';
+    port: number;
+    help: boolean;
+}
+
+function parseCliArgs(): CliOptions {
+    const { values } = parseArgs({
+        options: {
+            transport: {
+                type: 'string',
+                short: 't',
+                default: 'stdio',
+            },
+            port: {
+                type: 'string',
+                short: 'p',
+                default: process.env.MCP_PORT ?? '3100',
+            },
+            help: {
+                type: 'boolean',
+                short: 'h',
+                default: false,
+            },
+        },
+        allowPositionals: true,
+    });
+
+    const transport = values.transport as string;
+    if (transport !== 'stdio' && transport !== 'http' && transport !== 'both') {
+        console.error(`Invalid transport: ${transport}. Must be 'stdio', 'http', or 'both'.`);
+        process.exit(1);
+    }
+
+    return {
+        transport: transport as 'stdio' | 'http' | 'both',
+        port: parseInt(values.port as string, 10),
+        help: values.help as boolean,
+    };
+}
 
 class ContextMcpServer {
     private server: Server;
@@ -37,8 +81,11 @@ class ContextMcpServer {
     private snapshotManager: SnapshotManager;
     private syncManager: SyncManager;
     private toolHandlers: ToolHandlers;
+    private httpTransport: HttpTransport | null = null;
+    private version: string;
 
     constructor(config: ContextMcpConfig) {
+        this.version = config.version;
         // Initialize MCP server
         this.server = new Server(
             {
@@ -255,32 +302,79 @@ This tool is versatile and can be used before completing various tasks to retrie
         });
     }
 
-    async start() {
+    async start(cliOptions: CliOptions) {
         console.log('[SYNC-DEBUG] MCP server start() method called');
         console.log('Starting Context MCP server...');
+        console.log(`[TRANSPORT] Mode: ${cliOptions.transport}`);
 
-        const transport = new StdioServerTransport();
-        console.log('[SYNC-DEBUG] StdioServerTransport created, attempting server connection...');
+        const useStdio = cliOptions.transport === 'stdio' || cliOptions.transport === 'both';
+        const useHttp = cliOptions.transport === 'http' || cliOptions.transport === 'both';
 
-        await this.server.connect(transport);
-        console.log("MCP server started and listening on stdio.");
-        console.log('[SYNC-DEBUG] Server connection established successfully');
+        // Start HTTP transport if requested
+        if (useHttp) {
+            console.log(`[HTTP] Starting HTTP transport on port ${cliOptions.port}...`);
+            this.httpTransport = new HttpTransport({
+                port: cliOptions.port,
+                mcpServer: this.server,
+                version: this.version,
+            });
+            await this.httpTransport.start();
+        }
+
+        // Start stdio transport if requested
+        if (useStdio) {
+            const stdioTransport = new StdioServerTransport();
+            console.log('[SYNC-DEBUG] StdioServerTransport created, attempting server connection...');
+            await this.server.connect(stdioTransport);
+            console.log("MCP server started and listening on stdio.");
+            console.log('[SYNC-DEBUG] Server connection established successfully');
+        }
 
         // Start background sync after server is connected
         console.log('[SYNC-DEBUG] Initializing background sync...');
         this.syncManager.startBackgroundSync();
         console.log('[SYNC-DEBUG] MCP server initialization complete');
     }
+
+    async stop() {
+        console.log('[SHUTDOWN] Stopping MCP server...');
+        if (this.httpTransport) {
+            await this.httpTransport.stop();
+        }
+        await this.server.close();
+        console.log('[SHUTDOWN] MCP server stopped');
+    }
+
+    /**
+     * Expose the MCP Server instance for external use
+     */
+    getMcpServer(): Server {
+        return this.server;
+    }
 }
+
+// Global reference for graceful shutdown
+let mcpServer: ContextMcpServer | null = null;
 
 // Main execution
 async function main() {
     // Parse command line arguments
-    const args = process.argv.slice(2);
+    const cliOptions = parseCliArgs();
 
     // Show help if requested
-    if (args.includes('--help') || args.includes('-h')) {
+    if (cliOptions.help) {
         showHelpMessage();
+        console.log(`
+Transport Options:
+  --transport, -t    Transport mode: stdio, http, or both (default: stdio)
+  --port, -p         HTTP server port (default: 3100, env: MCP_PORT)
+
+Examples:
+  npx @zilliz/claude-context-mcp                        # stdio only (default)
+  npx @zilliz/claude-context-mcp --transport http       # HTTP only on port 3100
+  npx @zilliz/claude-context-mcp --transport both       # Both stdio and HTTP
+  npx @zilliz/claude-context-mcp -t http -p 8080        # HTTP on port 8080
+`);
         process.exit(0);
     }
 
@@ -288,20 +382,25 @@ async function main() {
     const config = createMcpConfig();
     logConfigurationSummary(config);
 
-    const server = new ContextMcpServer(config);
-    await server.start();
+    mcpServer = new ContextMcpServer(config);
+    await mcpServer.start(cliOptions);
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', () => {
-    console.error("Received SIGINT, shutting down gracefully...");
+async function gracefulShutdown(signal: string) {
+    console.error(`Received ${signal}, shutting down gracefully...`);
+    if (mcpServer) {
+        try {
+            await mcpServer.stop();
+        } catch (error) {
+            console.error('Error during shutdown:', error);
+        }
+    }
     process.exit(0);
-});
+}
 
-process.on('SIGTERM', () => {
-    console.error("Received SIGTERM, shutting down gracefully...");
-    process.exit(0);
-});
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 // Always start the server - this is designed to be the main entry point
 main().catch((error) => {
