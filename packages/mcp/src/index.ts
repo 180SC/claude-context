@@ -21,7 +21,7 @@ import {
     ListToolsRequestSchema,
     CallToolRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { Context } from "@zilliz/claude-context-core";
+import { Context, createRegistryFromSnapshot } from "@zilliz/claude-context-core";
 import { MilvusVectorDatabase } from "@zilliz/claude-context-core";
 
 // Import our modular components
@@ -74,10 +74,20 @@ class ContextMcpServer {
         // Initialize managers
         this.snapshotManager = new SnapshotManager();
         this.syncManager = new SyncManager(this.context, this.snapshotManager);
-        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager);
 
         // Load existing codebase snapshot on startup
         this.snapshotManager.loadCodebaseSnapshot();
+
+        // Initialize repository registry from snapshot data
+        const repositories = this.snapshotManager.getAllRepositories();
+        const repositoriesRecord: Record<string, any> = {};
+        for (const [canonicalId, repo] of repositories) {
+            repositoriesRecord[canonicalId] = repo;
+        }
+        const registry = createRegistryFromSnapshot(repositoriesRecord);
+        console.log(`[REGISTRY] Initialized registry with ${registry.size} repositories (${registry.listIndexed().length} indexed)`);
+
+        this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager, registry);
 
         this.setupTools();
     }

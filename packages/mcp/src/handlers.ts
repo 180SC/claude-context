@@ -1,21 +1,37 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
 export class ToolHandlers {
     private context: Context;
     private snapshotManager: SnapshotManager;
+    private registry: RepoRegistry;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
 
-    constructor(context: Context, snapshotManager: SnapshotManager) {
+    constructor(context: Context, snapshotManager: SnapshotManager, registry?: RepoRegistry) {
         this.context = context;
         this.snapshotManager = snapshotManager;
+        this.registry = registry || new RepoRegistry();
         this.currentWorkspace = process.cwd();
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
+    }
+
+    /**
+     * Get the repository registry.
+     */
+    public getRegistry(): RepoRegistry {
+        return this.registry;
+    }
+
+    /**
+     * Set the repository registry (for initialization after startup).
+     */
+    public setRegistry(registry: RepoRegistry): void {
+        this.registry = registry;
     }
 
     /**
@@ -185,6 +201,37 @@ export class ToolHandlers {
                         text: `Error: Path '${absolutePath}' is not a directory`
                     }],
                     isError: true
+                };
+            }
+
+            // Registry check: Resolve identity and check if already indexed via another path
+            const registryResult = this.registry.resolve(absolutePath);
+            console.log(`[REGISTRY] Resolved path '${absolutePath}':`, {
+                found: registryResult.found,
+                isNewPathForExistingRepo: registryResult.isNewPathForExistingRepo,
+                canonicalId: registryResult.identity.canonicalId,
+                identitySource: registryResult.identity.identitySource,
+            });
+
+            // If this canonical ID is already indexed (and not force), skip indexing
+            if (!forceReindex && registryResult.found && registryResult.record?.isIndexed) {
+                const primaryPath = registryResult.primaryPath || registryResult.record.knownPaths[0];
+                const message = registryResult.isNewPathForExistingRepo
+                    ? `Repository already indexed as '${registryResult.record.displayName}' (primary path: ${primaryPath}). This path (${absolutePath}) is ${registryResult.identity.isWorktree ? 'a worktree' : 'a clone'} of the same repository. Registered as alias.`
+                    : `Codebase '${absolutePath}' is already indexed as '${registryResult.record.displayName}'. Use force=true to re-index.`;
+
+                // If this is a new path for an existing repo, register it
+                if (registryResult.isNewPathForExistingRepo) {
+                    this.registry.register(absolutePath);
+                    console.log(`[REGISTRY] Registered '${absolutePath}' as alias for '${primaryPath}'`);
+                }
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: message
+                    }],
+                    isError: false // Not an error, just already indexed
                 };
             }
 
@@ -384,6 +431,15 @@ export class ToolHandlers {
             // Set codebase to indexed status with complete statistics
             this.snapshotManager.setCodebaseIndexed(absolutePath, stats);
             this.indexingStats = { indexedFiles: stats.indexedFiles, totalChunks: stats.totalChunks };
+
+            // Register in the repository registry
+            this.registry.register(absolutePath, {
+                isIndexed: true,
+                collectionName,
+                indexedFiles: stats.indexedFiles,
+                totalChunks: stats.totalChunks,
+            });
+            console.log(`[REGISTRY] Registered '${absolutePath}' in registry`);
 
             // Save snapshot after updating codebase lists
             this.snapshotManager.saveCodebaseSnapshot();
@@ -640,6 +696,13 @@ export class ToolHandlers {
 
             // Completely remove the cleared codebase from snapshot
             this.snapshotManager.removeCodebaseCompletely(absolutePath);
+
+            // Mark repository as not indexed in the registry
+            const registryResult = this.registry.resolve(absolutePath);
+            if (registryResult.found && registryResult.record) {
+                this.registry.markNotIndexed(registryResult.record.canonicalId);
+                console.log(`[CLEAR] Marked repository as not indexed in registry: ${registryResult.record.displayName}`);
+            }
 
             // Reset indexing stats if this was the active codebase
             this.indexingStats = null;
