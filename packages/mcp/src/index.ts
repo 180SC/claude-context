@@ -279,6 +279,59 @@ This tool is versatile and can be used before completing various tasks to retrie
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "search_all",
+                        description: `Search across ALL indexed repositories simultaneously using natural language queries.
+
+🎯 **When to Use**:
+- Find code patterns, implementations, or concepts across multiple projects
+- Discover how similar functionality is implemented in different repositories
+- Locate related code across your entire indexed codebase collection
+- Cross-repository code review and analysis
+
+✨ **Features**:
+- Fan out query to all indexed collections in parallel
+- Normalize scores per collection for fair comparison
+- Merge and re-rank results globally
+- Results include repository attribution (repoName, repoCanonicalId)
+
+⚠️ **Performance**:
+- 5 second timeout per collection
+- 15 second total timeout
+- Returns top results across all repositories`,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                query: {
+                                    type: "string",
+                                    description: "Natural language query to search for across all indexed repositories"
+                                },
+                                limit: {
+                                    type: "number",
+                                    description: "Maximum total number of results to return (default: 20, max: 50)",
+                                    default: 20,
+                                    maximum: 50
+                                },
+                                repos: {
+                                    type: "array",
+                                    items: {
+                                        type: "string"
+                                    },
+                                    description: "Optional: Filter to specific repository names or canonical IDs. If not provided, searches all indexed repositories.",
+                                    default: []
+                                },
+                                extensionFilter: {
+                                    type: "array",
+                                    items: {
+                                        type: "string"
+                                    },
+                                    description: "Optional: List of file extensions to filter results (e.g., ['.ts', '.py']).",
+                                    default: []
+                                }
+                            },
+                            required: ["query"]
+                        }
+                    },
                 ]
             };
         });
@@ -296,6 +349,8 @@ This tool is versatile and can be used before completing various tasks to retrie
                     return await this.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":
                     return await this.toolHandlers.handleGetIndexingStatus(args);
+                case "search_all":
+                    return await this.toolHandlers.handleSearchAll(args);
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);

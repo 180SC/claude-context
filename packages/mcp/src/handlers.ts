@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord, CrossRepoSearchResult } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
@@ -428,8 +428,8 @@ export class ToolHandlers {
             });
             console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
-            // Set codebase to indexed status with complete statistics
-            this.snapshotManager.setCodebaseIndexed(absolutePath, stats);
+            // Set codebase to indexed status with complete statistics (including collectionName)
+            this.snapshotManager.setCodebaseIndexed(absolutePath, stats, collectionName);
             this.indexingStats = { indexedFiles: stats.indexedFiles, totalChunks: stats.totalChunks };
 
             // Register in the repository registry
@@ -855,6 +855,177 @@ export class ToolHandlers {
                 content: [{
                     type: "text",
                     text: `Error getting indexing status: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    /**
+     * Handle search_all: Search across ALL indexed repositories simultaneously.
+     * Fan out query to all indexed collections, normalize scores, merge and re-rank.
+     */
+    public async handleSearchAll(args: any) {
+        const { query, limit = 20, repos, extensionFilter } = args;
+        const totalLimit = Math.min(limit || 20, 50);
+
+        try {
+            // Sync indexed codebases from cloud first
+            await this.syncIndexedCodebasesFromCloud();
+
+            // Get all indexed repositories from snapshot
+            const allRepositories = this.snapshotManager.getAllRepositories();
+
+            if (allRepositories.size === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No indexed repositories found. Please index at least one codebase using the index_codebase tool first.`
+                    }]
+                };
+            }
+
+            // Build list of collections to search
+            const collectionsToSearch: Array<{ collectionName: string; repoName: string; repoCanonicalId: string }> = [];
+
+            // If repos filter is provided, filter to only those repos
+            const repoFilter = repos && Array.isArray(repos) && repos.length > 0
+                ? new Set(repos.map((r: string) => r.toLowerCase()))
+                : null;
+
+            for (const [canonicalId, repoData] of allRepositories) {
+                // Skip repos not in filter (if filter is provided)
+                if (repoFilter) {
+                    const displayNameLower = repoData.displayName?.toLowerCase() || '';
+                    const canonicalIdLower = canonicalId.toLowerCase();
+                    const matchesFilter = repoFilter.has(displayNameLower) ||
+                                         repoFilter.has(canonicalIdLower) ||
+                                         [...repoFilter].some(f => displayNameLower.includes(f) || canonicalIdLower.includes(f));
+                    if (!matchesFilter) {
+                        continue;
+                    }
+                }
+
+                // Check if the default branch is indexed
+                const defaultBranch = repoData.branches[repoData.defaultBranch || 'default'];
+                const isIndexed = defaultBranch?.status === 'indexed';
+
+                if (!isIndexed) {
+                    continue;
+                }
+
+                // Get collection name - use stored value or compute from first known path
+                let collectionName = repoData.collectionName;
+                if (!collectionName && repoData.knownPaths.length > 0) {
+                    // Fallback: compute collection name from the first known path
+                    collectionName = this.context.getCollectionName(repoData.knownPaths[0]);
+                    console.log(`[SEARCH-ALL] Computed collectionName '${collectionName}' for repo '${repoData.displayName}'`);
+                }
+
+                if (!collectionName) {
+                    console.warn(`[SEARCH-ALL] Skipping repo '${repoData.displayName}' - no collection name`);
+                    continue;
+                }
+
+                collectionsToSearch.push({
+                    collectionName,
+                    repoName: repoData.displayName || canonicalId,
+                    repoCanonicalId: canonicalId
+                });
+            }
+
+            if (collectionsToSearch.length === 0) {
+                const filterMessage = repoFilter
+                    ? ` matching filter: ${[...repoFilter].join(', ')}`
+                    : '';
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No indexed repositories found${filterMessage}. Please index at least one codebase using the index_codebase tool first.`
+                    }]
+                };
+            }
+
+            console.log(`[SEARCH-ALL] Searching across ${collectionsToSearch.length} repositories`);
+            console.log(`[SEARCH-ALL] Query: "${query}"`);
+            console.log(`[SEARCH-ALL] Repositories: ${collectionsToSearch.map(c => c.repoName).join(', ')}`);
+
+            // Log embedding provider information
+            const embeddingProvider = this.context.getEmbedding();
+            console.log(`[SEARCH-ALL] 🧠 Using embedding provider: ${embeddingProvider.getProvider()}`);
+
+            // Execute cross-repo search
+            const searchResults: CrossRepoSearchResult[] = await this.context.semanticSearchMulti(
+                collectionsToSearch,
+                query,
+                10, // topK per collection
+                totalLimit,
+                extensionFilter,
+                5000, // 5s per-collection timeout
+                15000 // 15s total timeout
+            );
+
+            console.log(`[SEARCH-ALL] ✅ Search completed! Found ${searchResults.length} results across ${collectionsToSearch.length} repositories`);
+
+            if (searchResults.length === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No results found for query: "${query}" across ${collectionsToSearch.length} indexed repositories.`
+                    }]
+                };
+            }
+
+            // Format results with repo attribution
+            const formattedResults = searchResults.map((result: CrossRepoSearchResult, index: number) => {
+                const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
+                const context = truncateContent(result.content, 5000);
+
+                return `${index + 1}. [${result.repoName}] Code snippet (${result.language})\n` +
+                    `   Location: ${location}\n` +
+                    `   Repository: ${result.repoName}\n` +
+                    `   Rank: ${index + 1}\n` +
+                    `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
+            }).join('\n');
+
+            // Group results by repo for summary
+            const resultsByRepo = new Map<string, number>();
+            for (const result of searchResults) {
+                const count = resultsByRepo.get(result.repoName) || 0;
+                resultsByRepo.set(result.repoName, count + 1);
+            }
+            const repoSummary = [...resultsByRepo.entries()]
+                .map(([repo, count]) => `${repo}: ${count}`)
+                .join(', ');
+
+            const resultMessage = `Found ${searchResults.length} results for query: "${query}" across ${collectionsToSearch.length} repositories.\n` +
+                `Results by repository: ${repoSummary}\n\n${formattedResults}`;
+
+            return {
+                content: [{
+                    type: "text",
+                    text: resultMessage
+                }]
+            };
+
+        } catch (error: any) {
+            console.error(`[SEARCH-ALL] Error:`, error);
+
+            const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+
+            if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: COLLECTION_LIMIT_MESSAGE
+                    }]
+                };
+            }
+
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error searching across repositories: ${errorMessage}`
                 }],
                 isError: true
             };

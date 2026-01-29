@@ -668,7 +668,8 @@ export class SnapshotManager {
      */
     public setCodebaseIndexed(
         codebasePath: string,
-        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }
+        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' },
+        collectionName?: string
     ): void {
         // Add to indexed list if not already there
         if (!this.indexedCodebases.includes(codebasePath)) {
@@ -689,6 +690,24 @@ export class SnapshotManager {
             lastUpdated: new Date().toISOString()
         };
         this.codebaseInfoMap.set(codebasePath, info);
+
+        // Update v3 repository state with collectionName
+        if (collectionName) {
+            this.updateRepositoryState(codebasePath, 'default', {
+                status: 'indexed',
+                indexedFiles: stats.indexedFiles,
+                totalChunks: stats.totalChunks,
+            });
+            // Set collectionName on the repository
+            const canonicalId = this.pathToCanonicalId.get(codebasePath);
+            if (canonicalId) {
+                const repo = this.repositories.get(canonicalId);
+                if (repo) {
+                    repo.collectionName = collectionName;
+                    console.log(`[SNAPSHOT-DEBUG] Set collectionName '${collectionName}' for repo '${canonicalId}'`);
+                }
+            }
+        }
     }
 
     /**

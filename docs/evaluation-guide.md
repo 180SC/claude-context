@@ -525,6 +525,121 @@ kill $SERVER_PID 2>/dev/null
 | Rate Limiting | 2.2.3 Rate limit enforced | |
 | stdio | 2.2.4 No auth required | |
 
+### Phase 3: Intelligence
+
+| Feature | Test Case | Status |
+|---------|-----------|--------|
+| Cross-repo Search | 3.1.1 search_all basic query | |
+| Cross-repo Search | 3.1.2 search_all with repos filter | |
+| Cross-repo Search | 3.1.3 search_all with extension filter | |
+| Cross-repo Search | 3.1.4 search_all timeout handling | |
+
+---
+
+## Phase 3: Intelligence Features
+
+### 3.1 Cross-Repository Search (search_all)
+
+**Purpose:** Verify that the system can search across ALL indexed repositories simultaneously.
+
+#### Test Case 3.1.1: Basic Cross-Repository Query
+
+```bash
+# Requires multiple repositories to be indexed first
+# Use the MCP client to test search_all tool
+
+# Example curl test (requires valid session):
+curl -s http://localhost:3100/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -X POST \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "search_all",
+      "arguments": {
+        "query": "authentication implementation",
+        "limit": 20
+      }
+    },
+    "id": 1
+  }'
+```
+
+**Expected Result:**
+- Returns results from all indexed repositories
+- Each result includes `repoName` and `repoCanonicalId`
+- Results are sorted by normalized score (descending)
+- Summary shows distribution of results by repository
+
+#### Test Case 3.1.2: Filtered Cross-Repository Query
+
+```bash
+# Search only in specific repositories
+curl -s http://localhost:3100/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -X POST \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "search_all",
+      "arguments": {
+        "query": "error handling",
+        "limit": 10,
+        "repos": ["myproject", "otherproject"]
+      }
+    },
+    "id": 1
+  }'
+```
+
+**Expected Result:**
+- Only returns results from filtered repositories
+- Other indexed repositories are not queried
+
+#### Test Case 3.1.3: Extension Filter
+
+```bash
+# Search only in TypeScript files across all repos
+curl -s http://localhost:3100/mcp \
+  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -X POST \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "search_all",
+      "arguments": {
+        "query": "API endpoints",
+        "extensionFilter": [".ts", ".tsx"]
+      }
+    },
+    "id": 1
+  }'
+```
+
+**Expected Result:**
+- Only returns results from .ts and .tsx files
+- Extension filter is applied per-collection
+
+#### Test Case 3.1.4: Timeout Handling
+
+The search_all tool has built-in timeout handling:
+- 5 second timeout per collection
+- 15 second total timeout
+
+To test timeout handling, index a very large repository and verify:
+- Slow collections are skipped after 5 seconds
+- Total search completes within 15 seconds
+- Results from fast collections are still returned
+
 ---
 
 ## Troubleshooting
