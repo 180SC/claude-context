@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # MCP Server - HTTP Transport Mode
   mcp-server:
