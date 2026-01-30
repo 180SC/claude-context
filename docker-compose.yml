@@ -1,5 +1,6 @@
 services:
   # MCP Server - HTTP Transport Mode
+  # Uses Zilliz Cloud by default (from .env), or local Milvus if using 'local' profile
   mcp-server:
     build:
       context: .
@@ -8,15 +9,9 @@ services:
       - "${MCP_PORT:-3100}:3100"
     env_file:
       - .env
-    environment:
-      # Override Milvus address to use local container if not set in .env
-      - MILVUS_ADDRESS=${MILVUS_ADDRESS:-milvus:19530}
     command: ["--transport", "http", "--port", "3100"]
     volumes:
       - mcp-data:/data
-    depends_on:
-      milvus:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/health"]
       interval: 30s
@@ -26,9 +21,11 @@ services:
     restart: unless-stopped
 
   # Local Milvus instance (standalone mode)
-  # For production, use Zilliz Cloud instead
+  # Only starts with: docker compose --profile local up
   milvus:
     image: milvusdb/milvus:v2.4.0
+    profiles:
+      - local
     environment:
       - ETCD_USE_EMBED=true
       - ETCD_DATA_DIR=/var/lib/milvus/etcd
@@ -47,14 +44,15 @@ services:
     restart: unless-stopped
 
   # Optional: Ollama for local embeddings (no API key required)
+  # Only starts with: docker compose --profile ollama up
   ollama:
     image: ollama/ollama:latest
+    profiles:
+      - ollama
     ports:
       - "11434:11434"
     volumes:
       - ollama-data:/root/.ollama
-    profiles:
-      - ollama
     restart: unless-stopped
 
 volumes:
