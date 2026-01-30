@@ -56,11 +56,11 @@ ENV NODE_ENV=production
 ENV HOME=/data
 
 # Expose HTTP port (when using HTTP transport)
-EXPOSE 3000
+EXPOSE 3100
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:3100/health || exit 1
 
 # Default to stdio transport (compatible with MCP clients)
 # Override with --transport http for HTTP mode
