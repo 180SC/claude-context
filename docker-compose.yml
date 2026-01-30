@@ -43,9 +43,12 @@ services:
       start_period: 90s
     restart: unless-stopped
 
-  # Ollama for local embeddings (no API key required)
+  # Optional: Ollama for local embeddings (no API key required)
+  # Only starts with: docker compose --profile ollama up
   ollama:
     image: ollama/ollama:latest
+    profiles:
+      - ollama
     ports:
       - "11434:11434"
     volumes:
