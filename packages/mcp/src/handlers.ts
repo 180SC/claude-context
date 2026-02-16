@@ -44,7 +44,8 @@ export class ToolHandlers {
      * - If local snapshot has extra directories (not in cloud), remove them
      * - If local snapshot is missing directories (exist in cloud), ignore them
      */
-    private async syncIndexedCodebasesFromCloud(): Promise<void> {
+    private async syncIndexedCodebasesFromCloud(): Promise<Map<string, string>> {
+        const cloudCollectionMap = new Map<string, string>(); // collectionName -> codebasePath
         try {
             console.log(`[SYNC-CLOUD] 🔄 Syncing indexed codebases from Zilliz Cloud...`);
 
@@ -69,7 +70,7 @@ export class ToolHandlers {
                     this.snapshotManager.saveCodebaseSnapshot();
                     console.log(`[SYNC-CLOUD] 💾 Updated snapshot to match empty cloud state`);
                 }
-                return;
+                return cloudCollectionMap;
             }
 
             const cloudCodebases = new Set<string>();
@@ -105,6 +106,7 @@ export class ToolHandlers {
                                 if (codebasePath && typeof codebasePath === 'string') {
                                     console.log(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionName}`);
                                     cloudCodebases.add(codebasePath);
+                                    cloudCollectionMap.set(collectionName, codebasePath);
                                 } else {
                                     console.warn(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionName}`);
                                 }
@@ -151,9 +153,11 @@ export class ToolHandlers {
             }
 
             console.log(`[SYNC-CLOUD] ✅ Cloud sync completed successfully`);
+            return cloudCollectionMap;
         } catch (error: any) {
             console.error(`[SYNC-CLOUD] ❌ Error syncing codebases from cloud:`, error.message || error);
             // Don't throw - this is not critical for the main functionality
+            return cloudCollectionMap;
         }
     }
 
@@ -871,19 +875,10 @@ export class ToolHandlers {
 
         try {
             // Sync indexed codebases from cloud first
-            await this.syncIndexedCodebasesFromCloud();
+            const cloudCollectionMap = await this.syncIndexedCodebasesFromCloud();
 
             // Get all indexed repositories from snapshot
             const allRepositories = this.snapshotManager.getAllRepositories();
-
-            if (allRepositories.size === 0) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `No indexed repositories found. Please index at least one codebase using the index_codebase tool first.`
-                    }]
-                };
-            }
 
             // Build list of collections to search
             const collectionsToSearch: Array<{ collectionName: string; repoName: string; repoCanonicalId: string }> = [];
@@ -893,45 +888,72 @@ export class ToolHandlers {
                 ? new Set(repos.map((r: string) => r.toLowerCase()))
                 : null;
 
-            for (const [canonicalId, repoData] of allRepositories) {
-                // Skip repos not in filter (if filter is provided)
-                if (repoFilter) {
-                    const displayNameLower = repoData.displayName?.toLowerCase() || '';
-                    const canonicalIdLower = canonicalId.toLowerCase();
-                    const matchesFilter = repoFilter.has(displayNameLower) ||
-                                         repoFilter.has(canonicalIdLower) ||
-                                         [...repoFilter].some(f => displayNameLower.includes(f) || canonicalIdLower.includes(f));
-                    if (!matchesFilter) {
+            if (allRepositories.size > 0) {
+                // PRIMARY PATH: Build from local snapshot
+                for (const [canonicalId, repoData] of allRepositories) {
+                    // Skip repos not in filter (if filter is provided)
+                    if (repoFilter) {
+                        const displayNameLower = repoData.displayName?.toLowerCase() || '';
+                        const canonicalIdLower = canonicalId.toLowerCase();
+                        const matchesFilter = repoFilter.has(displayNameLower) ||
+                                             repoFilter.has(canonicalIdLower) ||
+                                             [...repoFilter].some(f => displayNameLower.includes(f) || canonicalIdLower.includes(f));
+                        if (!matchesFilter) {
+                            continue;
+                        }
+                    }
+
+                    // Check if the default branch is indexed
+                    const defaultBranch = repoData.branches[repoData.defaultBranch || 'default'];
+                    const isIndexed = defaultBranch?.status === 'indexed';
+
+                    if (!isIndexed) {
                         continue;
                     }
+
+                    // Get collection name - use stored value or compute from first known path
+                    let collectionName = repoData.collectionName;
+                    if (!collectionName && repoData.knownPaths.length > 0) {
+                        // Fallback: compute collection name from the first known path
+                        collectionName = this.context.getCollectionName(repoData.knownPaths[0]);
+                        console.log(`[SEARCH-ALL] Computed collectionName '${collectionName}' for repo '${repoData.displayName}'`);
+                    }
+
+                    if (!collectionName) {
+                        console.warn(`[SEARCH-ALL] Skipping repo '${repoData.displayName}' - no collection name`);
+                        continue;
+                    }
+
+                    collectionsToSearch.push({
+                        collectionName,
+                        repoName: repoData.displayName || canonicalId,
+                        repoCanonicalId: canonicalId
+                    });
                 }
+            }
 
-                // Check if the default branch is indexed
-                const defaultBranch = repoData.branches[repoData.defaultBranch || 'default'];
-                const isIndexed = defaultBranch?.status === 'indexed';
+            // CLOUD FALLBACK: If local snapshot yielded nothing, use cloud-discovered collections
+            if (collectionsToSearch.length === 0 && cloudCollectionMap.size > 0) {
+                console.log(`[SEARCH-ALL] Local snapshot empty, using ${cloudCollectionMap.size} cloud-discovered collections as fallback`);
 
-                if (!isIndexed) {
-                    continue;
+                for (const [collectionName, codebasePath] of cloudCollectionMap) {
+                    const repoName = path.basename(codebasePath);
+
+                    // Apply repo filter if provided
+                    if (repoFilter) {
+                        const repoNameLower = repoName.toLowerCase();
+                        const matchesFilter = [...repoFilter].some(f => repoNameLower.includes(f));
+                        if (!matchesFilter) {
+                            continue;
+                        }
+                    }
+
+                    collectionsToSearch.push({
+                        collectionName,
+                        repoName,
+                        repoCanonicalId: collectionName,
+                    });
                 }
-
-                // Get collection name - use stored value or compute from first known path
-                let collectionName = repoData.collectionName;
-                if (!collectionName && repoData.knownPaths.length > 0) {
-                    // Fallback: compute collection name from the first known path
-                    collectionName = this.context.getCollectionName(repoData.knownPaths[0]);
-                    console.log(`[SEARCH-ALL] Computed collectionName '${collectionName}' for repo '${repoData.displayName}'`);
-                }
-
-                if (!collectionName) {
-                    console.warn(`[SEARCH-ALL] Skipping repo '${repoData.displayName}' - no collection name`);
-                    continue;
-                }
-
-                collectionsToSearch.push({
-                    collectionName,
-                    repoName: repoData.displayName || canonicalId,
-                    repoCanonicalId: canonicalId
-                });
             }
 
             if (collectionsToSearch.length === 0) {
