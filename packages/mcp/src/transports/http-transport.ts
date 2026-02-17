@@ -15,8 +15,10 @@ export interface HttpTransportOptions {
   port: number;
   /** CORS allowed origins (default: '*') */
   corsOrigin?: string;
-  /** MCP server instance */
-  mcpServer: Server;
+  /** MCP server instance (used for stdio; ignored when mcpServerFactory is provided) */
+  mcpServer?: Server;
+  /** Factory to create a new MCP server per session (enables multi-session concurrency) */
+  mcpServerFactory?: () => Server;
   /** Server version for health endpoint */
   version: string;
   /** Bearer token for authentication (required for secure access) */
@@ -42,8 +44,9 @@ export interface HttpTransportInfo {
  */
 export class HttpTransport {
   private server: http.Server;
-  private mcpServer: Server;
+  private mcpServerFactory: () => Server;
   private transports: Map<string, StreamableHTTPServerTransport> = new Map();
+  private sessionServers: Map<string, Server> = new Map(); // per-session MCP server instances
   private port: number;
   private corsOrigin: string;
   private version: string;
@@ -54,9 +57,18 @@ export class HttpTransport {
   constructor(options: HttpTransportOptions) {
     this.port = options.port;
     this.corsOrigin = options.corsOrigin ?? '*';
-    this.mcpServer = options.mcpServer;
     this.version = options.version;
     this.startTime = new Date();
+
+    // Use factory if provided, otherwise wrap single server (backward compat)
+    if (options.mcpServerFactory) {
+      this.mcpServerFactory = options.mcpServerFactory;
+    } else if (options.mcpServer) {
+      const singleServer = options.mcpServer;
+      this.mcpServerFactory = () => singleServer;
+    } else {
+      throw new Error('HttpTransport requires either mcpServerFactory or mcpServer');
+    }
 
     // Initialize authentication middleware if token is provided
     if (options.authToken) {
@@ -191,14 +203,25 @@ export class HttpTransport {
       // Clean up on close
       transport.onclose = () => {
         const sid = transport?.sessionId;
-        if (sid && this.transports.has(sid)) {
+        if (sid) {
           console.log(`[HTTP] Session closed: ${sid}`);
           this.transports.delete(sid);
+          const sessionServer = this.sessionServers.get(sid);
+          if (sessionServer) {
+            sessionServer.close().catch(() => {});
+            this.sessionServers.delete(sid);
+          }
         }
       };
 
-      // Connect transport to MCP server
-      await this.mcpServer.connect(transport);
+      // Create a dedicated MCP server for this session and connect
+      const sessionServer = this.mcpServerFactory();
+      await sessionServer.connect(transport);
+
+      // Store after connect so sessionId is available
+      if (transport.sessionId) {
+        this.sessionServers.set(transport.sessionId, sessionServer);
+      }
     } else if (sessionId && !this.transports.has(sessionId)) {
       // Invalid session ID
       res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -282,16 +305,21 @@ export class HttpTransport {
   async stop(): Promise<void> {
     console.log('[HTTP] Shutting down HTTP server...');
 
-    // Close all active transports
+    // Close all active transports and their per-session servers
     for (const [sessionId, transport] of this.transports) {
       try {
         console.log(`[HTTP] Closing session ${sessionId}`);
         await transport.close();
+        const sessionServer = this.sessionServers.get(sessionId);
+        if (sessionServer) {
+          await sessionServer.close();
+        }
       } catch (error) {
         console.error(`[HTTP] Error closing session ${sessionId}:`, error);
       }
     }
     this.transports.clear();
+    this.sessionServers.clear();
 
     // Close HTTP server
     return new Promise((resolve, reject) => {

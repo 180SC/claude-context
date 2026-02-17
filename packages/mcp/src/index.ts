@@ -137,10 +137,23 @@ class ContextMcpServer {
 
         this.toolHandlers = new ToolHandlers(this.context, this.snapshotManager, registry);
 
-        this.setupTools();
+        this.setupTools(this.server);
     }
 
-    private setupTools() {
+    /**
+     * Create a new MCP Server instance with tools registered.
+     * Used by HttpTransport to create per-session servers for concurrent connections.
+     */
+    private createMcpServer(): Server {
+        const server = new Server(
+            { name: 'Context MCP Server', version: this.version },
+            { capabilities: { tools: {} } }
+        );
+        this.setupTools(server);
+        return server;
+    }
+
+    private setupTools(server: Server) {
         const index_description = `
 Index a codebase directory to enable semantic search using a configurable code splitter.
 
@@ -175,7 +188,7 @@ This tool is versatile and can be used before completing various tasks to retrie
 `;
 
         // Define available tools
-        this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+        server.setRequestHandler(ListToolsRequestSchema, async () => {
             return {
                 tools: [
                     {
@@ -337,7 +350,7 @@ This tool is versatile and can be used before completing various tasks to retrie
         });
 
         // Handle tool execution
-        this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+        server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
 
             switch (name) {
@@ -374,7 +387,7 @@ This tool is versatile and can be used before completing various tasks to retrie
             console.log(`[HTTP] Starting HTTP transport on port ${cliOptions.port}...`);
             this.httpTransport = new HttpTransport({
                 port: cliOptions.port,
-                mcpServer: this.server,
+                mcpServerFactory: () => this.createMcpServer(),
                 version: this.version,
                 authToken: authToken ?? undefined,
             });
