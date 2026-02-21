@@ -4,10 +4,10 @@
     "description": "Model Context Protocol integration for Claude Context",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
-    "bin": "dist/index.js",
+    "bin": "dist/cli.js",
     "scripts": {
         "build": "pnpm clean && tsc --build --force",
-        "dev": "tsx --watch src/index.ts",
+        "dev": "tsx --watch src/cli.ts",
         "clean": "rimraf dist",
         "lint": "eslint src --ext .ts",
         "lint:fix": "eslint src --ext .ts --fix",
@@ -15,7 +15,7 @@
         "test": "jest",
         "test:watch": "jest --watch",
         "test:coverage": "jest --coverage",
-        "start": "tsx src/index.ts",
+        "start": "tsx src/cli.ts",
         "start:with-env": "OPENAI_API_KEY=${OPENAI_API_KEY:your-api-key-here} MILVUS_ADDRESS=${MILVUS_ADDRESS:localhost:19530} tsx src/index.ts",
         "prepublishOnly": "pnpm build"
     },
