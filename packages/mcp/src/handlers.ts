@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord, CrossRepoSearchResult } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord, CrossRepoSearchResult, resolveIdentity, getCurrentBranch } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
@@ -933,34 +933,60 @@ export class ToolHandlers {
             }
 
             // ALWAYS merge cloud-discovered collections (search_all = cloud by definition)
+            // Deduplicate by canonical ID to avoid searching worktrees/clones of the same repo
             if (cloudCollectionMap.size > 0) {
                 const existingCollections = new Set(collectionsToSearch.map(c => c.collectionName));
+                const coveredCanonicalIds = new Set(collectionsToSearch.map(c => c.repoCanonicalId));
                 let cloudAdded = 0;
+                let cloudDeduped = 0;
 
                 for (const [collectionName, codebasePath] of cloudCollectionMap) {
                     if (existingCollections.has(collectionName)) continue;
 
-                    const repoName = path.basename(codebasePath);
+                    // Try to resolve identity to detect worktree/clone overlap with already-included repos
+                    let repoCanonicalId = collectionName; // fallback for non-local paths
+                    let repoName = path.basename(codebasePath);
+
+                    try {
+                        if (fs.existsSync(codebasePath)) {
+                            const identity = resolveIdentity(codebasePath);
+                            repoCanonicalId = identity.canonicalId;
+                            repoName = identity.displayName;
+
+                            if (coveredCanonicalIds.has(repoCanonicalId)) {
+                                console.log(`[SEARCH-ALL] Skipping cloud collection '${collectionName}' (${repoName}) — same repo as already-included canonical ID '${repoCanonicalId}'`);
+                                cloudDeduped++;
+                                continue;
+                            }
+                        }
+                    } catch {
+                        // Identity resolution failed — keep fallback values
+                    }
 
                     // Apply repo filter if provided
                     if (repoFilter) {
                         const repoNameLower = repoName.toLowerCase();
-                        const matchesFilter = [...repoFilter].some(f => repoNameLower.includes(f));
+                        const canonicalIdLower = repoCanonicalId.toLowerCase();
+                        const matchesFilter = [...repoFilter].some(f => repoNameLower.includes(f) || canonicalIdLower.includes(f));
                         if (!matchesFilter) {
                             continue;
                         }
                     }
 
+                    coveredCanonicalIds.add(repoCanonicalId);
                     collectionsToSearch.push({
                         collectionName,
                         repoName,
-                        repoCanonicalId: collectionName,
+                        repoCanonicalId,
                     });
                     cloudAdded++;
                 }
 
                 if (cloudAdded > 0) {
                     console.log(`[SEARCH-ALL] Added ${cloudAdded} cloud-discovered collections not in local snapshot`);
+                }
+                if (cloudDeduped > 0) {
+                    console.log(`[SEARCH-ALL] Deduped ${cloudDeduped} cloud collections (worktrees/clones of already-indexed repos)`);
                 }
             }
 
@@ -1018,18 +1044,50 @@ export class ToolHandlers {
                     `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
             }).join('\n');
 
-            // Group results by repo for summary
-            const resultsByRepo = new Map<string, number>();
+            // Group results by repo for summary, with worktree/path metadata
+            const repoMeta = new Map<string, { count: number; canonicalId: string; paths?: string[]; worktrees?: string[] }>();
             for (const result of searchResults) {
-                const count = resultsByRepo.get(result.repoName) || 0;
-                resultsByRepo.set(result.repoName, count + 1);
+                const existing = repoMeta.get(result.repoName) || { count: 0, canonicalId: result.repoCanonicalId };
+                existing.count++;
+                // Attach path info from snapshot once per repo
+                if (!existing.paths) {
+                    const repoData = allRepositories.get(result.repoCanonicalId);
+                    if (repoData && repoData.knownPaths.length > 1) {
+                        existing.paths = repoData.knownPaths;
+                        existing.worktrees = repoData.worktrees.length > 0 ? repoData.worktrees : undefined;
+                    }
+                }
+                repoMeta.set(result.repoName, existing);
             }
-            const repoSummary = [...resultsByRepo.entries()]
-                .map(([repo, count]) => `${repo}: ${count}`)
+            const repoSummary = [...repoMeta.entries()]
+                .map(([repo, meta]) => `${repo}: ${meta.count}`)
                 .join(', ');
 
+            // Build path annotation for repos with multiple paths (worktrees/clones)
+            // Include branch info so the user knows which branch each worktree is on
+            const pathAnnotations: string[] = [];
+            for (const [repo, meta] of repoMeta) {
+                if (meta.paths && meta.paths.length > 1) {
+                    const pathDetails = meta.paths.map(p => {
+                        const name = path.basename(p);
+                        try {
+                            if (fs.existsSync(p)) {
+                                const branch = getCurrentBranch(p);
+                                return branch ? `${name} (${branch})` : name;
+                            }
+                        } catch { /* path not accessible */ }
+                        return name;
+                    }).join(', ');
+                    const worktreeNote = meta.worktrees && meta.worktrees.length > 0
+                        ? ` (${meta.worktrees.length} worktree${meta.worktrees.length > 1 ? 's' : ''})`
+                        : '';
+                    pathAnnotations.push(`Note: "${repo}" has ${meta.paths.length} indexed paths${worktreeNote}: ${pathDetails}`);
+                }
+            }
+            const pathNote = pathAnnotations.length > 0 ? '\n' + pathAnnotations.join('\n') + '\n' : '';
+
             const resultMessage = `Found ${searchResults.length} results for query: "${query}" across ${collectionsToSearch.length} repositories.\n` +
-                `Results by repository: ${repoSummary}\n\n${formattedResults}`;
+                `Results by repository: ${repoSummary}\n${pathNote}\n${formattedResults}`;
 
             return {
                 content: [{

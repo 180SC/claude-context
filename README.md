@@ -6,7 +6,7 @@ MCP server that gives Claude Code semantic search across your codebases. Index a
 
 If you work across multiple repositories, this is especially useful. Instead of Claude only knowing the repo you're currently in, `search_all` lets it search every codebase you've indexed in parallel. Find how you implemented auth in one project while working in another, reuse patterns across your stack, or spot inconsistencies before they become problems.
 
-Fork of [zilliztech/claude-context](https://github.com/zilliztech/claude-context). This fork fixes cross-repo search ranking (upstream normalized scores per-collection, breaking cross-repo comparisons), always merges cloud-discovered repos into `search_all` results, and restructures the MCP package for cleaner builds. An HTTP transport mode has also been added for remote and multi-session scenarios (bearer token auth, rate limiting) — this is under active development.
+Fork of [zilliztech/claude-context](https://github.com/zilliztech/claude-context). This fork fixes cross-repo search ranking (upstream normalized scores per-collection, breaking cross-repo comparisons), always merges cloud-discovered repos into `search_all` results, and restructures the MCP package for cleaner builds. It also includes git worktree awareness — `search_all` deduplicates worktrees and clones of the same repository so you get one set of results per repo, not duplicate hits from each worktree path. An HTTP transport mode has also been added for remote and multi-session scenarios (bearer token auth, rate limiting) — this is under active development.
 
 ## How It Works
 
@@ -107,6 +107,14 @@ Search across ALL indexed repositories at once.
 `search_all` discovers repos from two sources — the local snapshot (maintained as you index) and Zilliz Cloud (by listing collections directly). Both are always merged, so repos are found even if the local snapshot is stale.
 
 Results are ranked by raw cosine similarity, so a strong match in one repo ranks higher than a weak match in another regardless of which repo it came from.
+
+**Git worktree & clone aware:** If you've indexed the same repository from multiple paths (e.g., git worktrees on different branches, or separate clones), `search_all` deduplicates them automatically using canonical repository identity. Results are attributed to a single repo, and the summary includes branch annotations so you know which worktree was searched:
+
+```
+Found 12 results for query: "auth middleware" across 3 repositories.
+Results by repository: my-app: 8, infra: 3, shared-lib: 1
+Note: "my-app" has 3 indexed paths (2 worktrees): main (master), feature (feat/oauth), hotfix (fix/login)
+```
 
 **`search_all` vs `search_code`:**
 
@@ -221,6 +229,7 @@ Set `EMBEDDING_MODEL` to override the default model for any provider.
 - **AST-aware chunking** — Syntax-aware splitting for TypeScript, Python, Java, Go, Rust, C++, C#, Scala (automatic fallback for other languages)
 - **Incremental indexing** — Only re-indexes changed files using Merkle trees
 - **Cross-repo search** — `search_all` searches every indexed repo in parallel
+- **Worktree-optimized** — Deduplicates git worktrees and clones so each repo is searched once, with branch annotations in results
 - **Scalable** — Zilliz Cloud handles codebases of any size
 - **HTTP transport** — Network-accessible with bearer token auth and rate limiting ([deployment guide](docs/deployment.md))
 - **Multi-session** — Multiple LLMs can connect simultaneously via isolated HTTP sessions
