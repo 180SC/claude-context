@@ -628,7 +628,7 @@ npx @zilliz/claude-context-mcp@latest
 - ⚡ **Real-time**: Interactive indexing and searching with progress feedback
 - 🌐 **HTTP Transport**: Network-accessible via Streamable HTTP with bearer token auth and rate limiting
 - 🔀 **Multi-Session Concurrency**: Per-session server isolation allows multiple LLMs to connect simultaneously
-- 🔎 **Cross-Repo Search**: `search_all` tool searches across all indexed repositories in parallel with cloud fallback for Docker deployments
+- 🔎 **Cross-Repo Search**: `search_all` tool searches across all indexed repositories in parallel, ranked by relevance using raw similarity scores
 
 ## Available Tools
 
@@ -673,7 +673,7 @@ Get the current indexing status of a codebase. Shows progress percentage for act
 
 ### 5. `search_all`
 
-Search across ALL indexed repositories simultaneously using natural language queries. Fans out the query to all indexed collections in parallel, normalizes scores per collection, and merges/re-ranks results globally.
+Search across ALL indexed repositories simultaneously using natural language queries. Fans out the query to all indexed collections in parallel and merges results ranked by relevance.
 
 **Parameters:**
 
@@ -682,7 +682,26 @@ Search across ALL indexed repositories simultaneously using natural language que
 - `repos` (optional): Filter to specific repository names or canonical IDs (default: all)
 - `extensionFilter` (optional): List of file extensions to filter results (e.g., ['.ts', '.py']) (default: [])
 
-> **Note:** When running in Docker (where host filesystem paths are not accessible), `search_all` automatically falls back to cloud-discovered collections from Zilliz Cloud. This allows it to search across all indexed codebases without requiring a local snapshot.
+**How it works:**
+
+`search_all` discovers indexed repositories from two sources — the local snapshot (maintained automatically as you index codebases) and Zilliz Cloud (by listing collections directly). Both sources are always merged, so repositories are found regardless of whether the local snapshot is up to date. This is especially useful in Docker deployments where host filesystem paths aren't accessible.
+
+Results from all repositories are ranked using raw cosine similarity scores, which means results are compared fairly across repos. A strong match in one repository will rank higher than a weak match in another, even if the weak match was the best result in its repo.
+
+**When to use `search_all` vs `search_code`:**
+
+| | `search_code` | `search_all` |
+|---|---|---|
+| **Scope** | Single repository (by path) | All indexed repositories |
+| **Best for** | Focused work in one codebase | Finding patterns across projects, discovering how different repos solve similar problems |
+| **Requires** | Absolute path to the repo | Nothing — auto-discovers all indexed repos |
+| **Ranking** | Within one repo | Across all repos by relevance |
+| **Performance** | Fast (single collection) | Slightly slower (fans out to all collections in parallel, 5s timeout per collection, 15s total) |
+
+**Good to know:**
+- `search_all` requires Zilliz Cloud since each repository is stored as a separate collection. Local FAISS only supports a single collection.
+- If a collection takes longer than 5 seconds to respond, it will be skipped for that query. The server logs which collections timed out so you can investigate if results seem incomplete.
+- You can narrow results to specific repos using the `repos` filter if you know which projects you care about.
 
 ## HTTP Transport & Multi-Session Support
 
