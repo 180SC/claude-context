@@ -1,21 +1,37 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, RepoRegistry, RepoRecord, CrossRepoSearchResult } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
 export class ToolHandlers {
     private context: Context;
     private snapshotManager: SnapshotManager;
+    private registry: RepoRegistry;
     private indexingStats: { indexedFiles: number; totalChunks: number } | null = null;
     private currentWorkspace: string;
 
-    constructor(context: Context, snapshotManager: SnapshotManager) {
+    constructor(context: Context, snapshotManager: SnapshotManager, registry?: RepoRegistry) {
         this.context = context;
         this.snapshotManager = snapshotManager;
+        this.registry = registry || new RepoRegistry();
         this.currentWorkspace = process.cwd();
         console.log(`[WORKSPACE] Current workspace: ${this.currentWorkspace}`);
+    }
+
+    /**
+     * Get the repository registry.
+     */
+    public getRegistry(): RepoRegistry {
+        return this.registry;
+    }
+
+    /**
+     * Set the repository registry (for initialization after startup).
+     */
+    public setRegistry(registry: RepoRegistry): void {
+        this.registry = registry;
     }
 
     /**
@@ -28,7 +44,8 @@ export class ToolHandlers {
      * - If local snapshot has extra directories (not in cloud), remove them
      * - If local snapshot is missing directories (exist in cloud), ignore them
      */
-    private async syncIndexedCodebasesFromCloud(): Promise<void> {
+    private async syncIndexedCodebasesFromCloud(): Promise<Map<string, string>> {
+        const cloudCollectionMap = new Map<string, string>(); // collectionName -> codebasePath
         try {
             console.log(`[SYNC-CLOUD] 🔄 Syncing indexed codebases from Zilliz Cloud...`);
 
@@ -53,7 +70,7 @@ export class ToolHandlers {
                     this.snapshotManager.saveCodebaseSnapshot();
                     console.log(`[SYNC-CLOUD] 💾 Updated snapshot to match empty cloud state`);
                 }
-                return;
+                return cloudCollectionMap;
             }
 
             const cloudCodebases = new Set<string>();
@@ -89,6 +106,7 @@ export class ToolHandlers {
                                 if (codebasePath && typeof codebasePath === 'string') {
                                     console.log(`[SYNC-CLOUD] 📍 Found codebase path: ${codebasePath} in collection: ${collectionName}`);
                                     cloudCodebases.add(codebasePath);
+                                    cloudCollectionMap.set(collectionName, codebasePath);
                                 } else {
                                     console.warn(`[SYNC-CLOUD] ⚠️  No codebasePath found in metadata for collection: ${collectionName}`);
                                 }
@@ -135,9 +153,11 @@ export class ToolHandlers {
             }
 
             console.log(`[SYNC-CLOUD] ✅ Cloud sync completed successfully`);
+            return cloudCollectionMap;
         } catch (error: any) {
             console.error(`[SYNC-CLOUD] ❌ Error syncing codebases from cloud:`, error.message || error);
             // Don't throw - this is not critical for the main functionality
+            return cloudCollectionMap;
         }
     }
 
@@ -185,6 +205,37 @@ export class ToolHandlers {
                         text: `Error: Path '${absolutePath}' is not a directory`
                     }],
                     isError: true
+                };
+            }
+
+            // Registry check: Resolve identity and check if already indexed via another path
+            const registryResult = this.registry.resolve(absolutePath);
+            console.log(`[REGISTRY] Resolved path '${absolutePath}':`, {
+                found: registryResult.found,
+                isNewPathForExistingRepo: registryResult.isNewPathForExistingRepo,
+                canonicalId: registryResult.identity.canonicalId,
+                identitySource: registryResult.identity.identitySource,
+            });
+
+            // If this canonical ID is already indexed (and not force), skip indexing
+            if (!forceReindex && registryResult.found && registryResult.record?.isIndexed) {
+                const primaryPath = registryResult.primaryPath || registryResult.record.knownPaths[0];
+                const message = registryResult.isNewPathForExistingRepo
+                    ? `Repository already indexed as '${registryResult.record.displayName}' (primary path: ${primaryPath}). This path (${absolutePath}) is ${registryResult.identity.isWorktree ? 'a worktree' : 'a clone'} of the same repository. Registered as alias.`
+                    : `Codebase '${absolutePath}' is already indexed as '${registryResult.record.displayName}'. Use force=true to re-index.`;
+
+                // If this is a new path for an existing repo, register it
+                if (registryResult.isNewPathForExistingRepo) {
+                    this.registry.register(absolutePath);
+                    console.log(`[REGISTRY] Registered '${absolutePath}' as alias for '${primaryPath}'`);
+                }
+
+                return {
+                    content: [{
+                        type: "text",
+                        text: message
+                    }],
+                    isError: false // Not an error, just already indexed
                 };
             }
 
@@ -381,9 +432,18 @@ export class ToolHandlers {
             });
             console.log(`[BACKGROUND-INDEX] ✅ Indexing completed successfully! Files: ${stats.indexedFiles}, Chunks: ${stats.totalChunks}`);
 
-            // Set codebase to indexed status with complete statistics
-            this.snapshotManager.setCodebaseIndexed(absolutePath, stats);
+            // Set codebase to indexed status with complete statistics (including collectionName)
+            this.snapshotManager.setCodebaseIndexed(absolutePath, stats, collectionName);
             this.indexingStats = { indexedFiles: stats.indexedFiles, totalChunks: stats.totalChunks };
+
+            // Register in the repository registry
+            this.registry.register(absolutePath, {
+                isIndexed: true,
+                collectionName,
+                indexedFiles: stats.indexedFiles,
+                totalChunks: stats.totalChunks,
+            });
+            console.log(`[REGISTRY] Registered '${absolutePath}' in registry`);
 
             // Save snapshot after updating codebase lists
             this.snapshotManager.saveCodebaseSnapshot();
@@ -641,6 +701,13 @@ export class ToolHandlers {
             // Completely remove the cleared codebase from snapshot
             this.snapshotManager.removeCodebaseCompletely(absolutePath);
 
+            // Mark repository as not indexed in the registry
+            const registryResult = this.registry.resolve(absolutePath);
+            if (registryResult.found && registryResult.record) {
+                this.registry.markNotIndexed(registryResult.record.canonicalId);
+                console.log(`[CLEAR] Marked repository as not indexed in registry: ${registryResult.record.displayName}`);
+            }
+
             // Reset indexing stats if this was the active codebase
             this.indexingStats = null;
 
@@ -792,6 +859,203 @@ export class ToolHandlers {
                 content: [{
                     type: "text",
                     text: `Error getting indexing status: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    /**
+     * Handle search_all: Search across ALL indexed repositories simultaneously.
+     * Fan out query to all indexed collections, normalize scores, merge and re-rank.
+     */
+    public async handleSearchAll(args: any) {
+        const { query, limit = 20, repos, extensionFilter } = args;
+        const totalLimit = Math.min(limit || 20, 50);
+
+        try {
+            // Sync indexed codebases from cloud first
+            const cloudCollectionMap = await this.syncIndexedCodebasesFromCloud();
+
+            // Get all indexed repositories from snapshot
+            const allRepositories = this.snapshotManager.getAllRepositories();
+
+            // Build list of collections to search
+            const collectionsToSearch: Array<{ collectionName: string; repoName: string; repoCanonicalId: string }> = [];
+
+            // If repos filter is provided, filter to only those repos
+            const repoFilter = repos && Array.isArray(repos) && repos.length > 0
+                ? new Set(repos.map((r: string) => r.toLowerCase()))
+                : null;
+
+            if (allRepositories.size > 0) {
+                // PRIMARY PATH: Build from local snapshot
+                for (const [canonicalId, repoData] of allRepositories) {
+                    // Skip repos not in filter (if filter is provided)
+                    if (repoFilter) {
+                        const displayNameLower = repoData.displayName?.toLowerCase() || '';
+                        const canonicalIdLower = canonicalId.toLowerCase();
+                        const matchesFilter = repoFilter.has(displayNameLower) ||
+                                             repoFilter.has(canonicalIdLower) ||
+                                             [...repoFilter].some(f => displayNameLower.includes(f) || canonicalIdLower.includes(f));
+                        if (!matchesFilter) {
+                            continue;
+                        }
+                    }
+
+                    // Check if the default branch is indexed
+                    const defaultBranch = repoData.branches[repoData.defaultBranch || 'default'];
+                    const isIndexed = defaultBranch?.status === 'indexed';
+
+                    if (!isIndexed) {
+                        continue;
+                    }
+
+                    // Get collection name - use stored value or compute from first known path
+                    let collectionName = repoData.collectionName;
+                    if (!collectionName && repoData.knownPaths.length > 0) {
+                        // Fallback: compute collection name from the first known path
+                        collectionName = this.context.getCollectionName(repoData.knownPaths[0]);
+                        console.log(`[SEARCH-ALL] Computed collectionName '${collectionName}' for repo '${repoData.displayName}'`);
+                    }
+
+                    if (!collectionName) {
+                        console.warn(`[SEARCH-ALL] Skipping repo '${repoData.displayName}' - no collection name`);
+                        continue;
+                    }
+
+                    collectionsToSearch.push({
+                        collectionName,
+                        repoName: repoData.displayName || canonicalId,
+                        repoCanonicalId: canonicalId
+                    });
+                }
+            }
+
+            // ALWAYS merge cloud-discovered collections (search_all = cloud by definition)
+            if (cloudCollectionMap.size > 0) {
+                const existingCollections = new Set(collectionsToSearch.map(c => c.collectionName));
+                let cloudAdded = 0;
+
+                for (const [collectionName, codebasePath] of cloudCollectionMap) {
+                    if (existingCollections.has(collectionName)) continue;
+
+                    const repoName = path.basename(codebasePath);
+
+                    // Apply repo filter if provided
+                    if (repoFilter) {
+                        const repoNameLower = repoName.toLowerCase();
+                        const matchesFilter = [...repoFilter].some(f => repoNameLower.includes(f));
+                        if (!matchesFilter) {
+                            continue;
+                        }
+                    }
+
+                    collectionsToSearch.push({
+                        collectionName,
+                        repoName,
+                        repoCanonicalId: collectionName,
+                    });
+                    cloudAdded++;
+                }
+
+                if (cloudAdded > 0) {
+                    console.log(`[SEARCH-ALL] Added ${cloudAdded} cloud-discovered collections not in local snapshot`);
+                }
+            }
+
+            if (collectionsToSearch.length === 0) {
+                const filterMessage = repoFilter
+                    ? ` matching filter: ${[...repoFilter].join(', ')}`
+                    : '';
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No indexed repositories found${filterMessage}. Please index at least one codebase using the index_codebase tool first.`
+                    }]
+                };
+            }
+
+            console.log(`[SEARCH-ALL] Searching across ${collectionsToSearch.length} repositories`);
+            console.log(`[SEARCH-ALL] Query: "${query}"`);
+            console.log(`[SEARCH-ALL] Repositories: ${collectionsToSearch.map(c => c.repoName).join(', ')}`);
+
+            // Log embedding provider information
+            const embeddingProvider = this.context.getEmbedding();
+            console.log(`[SEARCH-ALL] 🧠 Using embedding provider: ${embeddingProvider.getProvider()}`);
+
+            // Execute cross-repo search
+            const searchResults: CrossRepoSearchResult[] = await this.context.semanticSearchMulti(
+                collectionsToSearch,
+                query,
+                10, // topK per collection
+                totalLimit,
+                extensionFilter,
+                5000, // 5s per-collection timeout
+                15000 // 15s total timeout
+            );
+
+            console.log(`[SEARCH-ALL] ✅ Search completed! Found ${searchResults.length} results across ${collectionsToSearch.length} repositories`);
+
+            if (searchResults.length === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: `No results found for query: "${query}" across ${collectionsToSearch.length} indexed repositories.`
+                    }]
+                };
+            }
+
+            // Format results with repo attribution
+            const formattedResults = searchResults.map((result: CrossRepoSearchResult, index: number) => {
+                const location = `${result.relativePath}:${result.startLine}-${result.endLine}`;
+                const context = truncateContent(result.content, 5000);
+
+                return `${index + 1}. [${result.repoName}] Code snippet (${result.language})\n` +
+                    `   Location: ${location}\n` +
+                    `   Repository: ${result.repoName}\n` +
+                    `   Rank: ${index + 1}\n` +
+                    `   Context: \n\`\`\`${result.language}\n${context}\n\`\`\`\n`;
+            }).join('\n');
+
+            // Group results by repo for summary
+            const resultsByRepo = new Map<string, number>();
+            for (const result of searchResults) {
+                const count = resultsByRepo.get(result.repoName) || 0;
+                resultsByRepo.set(result.repoName, count + 1);
+            }
+            const repoSummary = [...resultsByRepo.entries()]
+                .map(([repo, count]) => `${repo}: ${count}`)
+                .join(', ');
+
+            const resultMessage = `Found ${searchResults.length} results for query: "${query}" across ${collectionsToSearch.length} repositories.\n` +
+                `Results by repository: ${repoSummary}\n\n${formattedResults}`;
+
+            return {
+                content: [{
+                    type: "text",
+                    text: resultMessage
+                }]
+            };
+
+        } catch (error: any) {
+            console.error(`[SEARCH-ALL] Error:`, error);
+
+            const errorMessage = typeof error === 'string' ? error : (error instanceof Error ? error.message : String(error));
+
+            if (errorMessage === COLLECTION_LIMIT_MESSAGE || errorMessage.includes(COLLECTION_LIMIT_MESSAGE)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: COLLECTION_LIMIT_MESSAGE
+                    }]
+                };
+            }
+
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error searching across repositories: ${errorMessage}`
                 }],
                 isError: true
             };

@@ -5,11 +5,15 @@ import {
     CodebaseSnapshot,
     CodebaseSnapshotV1,
     CodebaseSnapshotV2,
+    CodebaseSnapshotV3,
     CodebaseInfo,
     CodebaseInfoIndexing,
     CodebaseInfoIndexed,
-    CodebaseInfoIndexFailed
+    CodebaseInfoIndexFailed,
+    RepoSnapshot,
+    BranchSnapshot,
 } from "./config.js";
+import { resolveIdentity, RepoIdentity } from "@zilliz/claude-context-core";
 
 export class SnapshotManager {
     private snapshotFilePath: string;
@@ -18,9 +22,17 @@ export class SnapshotManager {
     private codebaseFileCount: Map<string, number> = new Map(); // Map of codebase path to indexed file count
     private codebaseInfoMap: Map<string, CodebaseInfo> = new Map(); // Map of codebase path to complete info
 
-    constructor() {
+    // V3 state: canonical-ID-keyed repository records
+    private repositories: Map<string, RepoSnapshot> = new Map(); // canonicalId -> RepoSnapshot
+    private pathToCanonicalId: Map<string, string> = new Map(); // path -> canonicalId (for quick lookups)
+
+    /**
+     * Create a new SnapshotManager.
+     * @param customSnapshotPath Optional custom snapshot file path (for testing)
+     */
+    constructor(customSnapshotPath?: string) {
         // Initialize snapshot file path
-        this.snapshotFilePath = path.join(os.homedir(), '.context', 'mcp-codebase-snapshot.json');
+        this.snapshotFilePath = customSnapshotPath || path.join(os.homedir(), '.context', 'mcp-codebase-snapshot.json');
     }
 
     /**
@@ -28,6 +40,275 @@ export class SnapshotManager {
      */
     private isV2Format(snapshot: any): snapshot is CodebaseSnapshotV2 {
         return snapshot && snapshot.formatVersion === 'v2';
+    }
+
+    /**
+     * Check if snapshot is v3 format
+     */
+    private isV3Format(snapshot: any): snapshot is CodebaseSnapshotV3 {
+        return snapshot && snapshot.formatVersion === 'v3';
+    }
+
+    /**
+     * Safely resolve git identity for a path.
+     * Returns null if resolution fails (e.g., git not available, invalid path).
+     */
+    private safeResolveIdentity(codebasePath: string): RepoIdentity | null {
+        try {
+            return resolveIdentity(codebasePath);
+        } catch (error) {
+            console.warn(`[SNAPSHOT-DEBUG] Failed to resolve identity for ${codebasePath}:`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Convert v1 format to v3 internal state
+     */
+    private migrateV1ToV3(snapshot: CodebaseSnapshotV1): void {
+        console.log('[SNAPSHOT-DEBUG] Migrating v1 format to v3');
+
+        const now = new Date().toISOString();
+        const repoGroups = new Map<string, { identity: RepoIdentity; paths: string[]; info: CodebaseInfo }>();
+
+        // Process indexed codebases
+        for (const codebasePath of snapshot.indexedCodebases || []) {
+            if (!fs.existsSync(codebasePath)) {
+                console.warn(`[SNAPSHOT-DEBUG] Codebase no longer exists, skipping: ${codebasePath}`);
+                continue;
+            }
+
+            const identity = this.safeResolveIdentity(codebasePath);
+            const canonicalId = identity?.canonicalId || this.pathBasedCanonicalId(codebasePath);
+
+            const info: CodebaseInfoIndexed = {
+                status: 'indexed',
+                indexedFiles: 0,
+                totalChunks: 0,
+                indexStatus: 'completed',
+                lastUpdated: now,
+            };
+
+            if (repoGroups.has(canonicalId)) {
+                const group = repoGroups.get(canonicalId)!;
+                if (!group.paths.includes(codebasePath)) {
+                    group.paths.push(codebasePath);
+                }
+            } else {
+                repoGroups.set(canonicalId, {
+                    identity: identity || this.createFallbackIdentity(codebasePath),
+                    paths: [codebasePath],
+                    info,
+                });
+            }
+        }
+
+        // Convert groups to v3 repositories
+        this.buildV3StateFromGroups(repoGroups);
+    }
+
+    /**
+     * Convert v2 format to v3 internal state
+     */
+    private migrateV2ToV3(snapshot: CodebaseSnapshotV2): void {
+        console.log('[SNAPSHOT-DEBUG] Migrating v2 format to v3');
+
+        const repoGroups = new Map<string, { identity: RepoIdentity; paths: string[]; info: CodebaseInfo }>();
+
+        for (const [codebasePath, info] of Object.entries(snapshot.codebases)) {
+            if (!fs.existsSync(codebasePath)) {
+                console.warn(`[SNAPSHOT-DEBUG] Codebase no longer exists, skipping: ${codebasePath}`);
+                continue;
+            }
+
+            const identity = this.safeResolveIdentity(codebasePath);
+            const canonicalId = identity?.canonicalId || this.pathBasedCanonicalId(codebasePath);
+
+            if (repoGroups.has(canonicalId)) {
+                const group = repoGroups.get(canonicalId)!;
+                if (!group.paths.includes(codebasePath)) {
+                    group.paths.push(codebasePath);
+                }
+                // Keep the most recent/complete info
+                if (info.status === 'indexed' && group.info.status !== 'indexed') {
+                    group.info = info;
+                }
+            } else {
+                repoGroups.set(canonicalId, {
+                    identity: identity || this.createFallbackIdentity(codebasePath),
+                    paths: [codebasePath],
+                    info,
+                });
+            }
+        }
+
+        // Convert groups to v3 repositories
+        this.buildV3StateFromGroups(repoGroups);
+    }
+
+    /**
+     * Load v3 format directly
+     */
+    private loadV3Format(snapshot: CodebaseSnapshotV3): void {
+        console.log('[SNAPSHOT-DEBUG] Loading v3 format snapshot');
+
+        this.repositories.clear();
+        this.pathToCanonicalId.clear();
+        this.indexedCodebases = [];
+        this.indexingCodebases.clear();
+        this.codebaseFileCount.clear();
+        this.codebaseInfoMap.clear();
+
+        for (const [canonicalId, repoSnapshot] of Object.entries(snapshot.repositories)) {
+            // Validate that at least one path still exists
+            const validPaths = repoSnapshot.knownPaths.filter(p => fs.existsSync(p));
+            if (validPaths.length === 0) {
+                console.warn(`[SNAPSHOT-DEBUG] No valid paths for repo ${canonicalId}, skipping`);
+                continue;
+            }
+
+            // Update the repo snapshot with valid paths only
+            const updatedSnapshot: RepoSnapshot = {
+                ...repoSnapshot,
+                knownPaths: validPaths,
+                worktrees: repoSnapshot.worktrees.filter(w => validPaths.includes(w)),
+            };
+
+            this.repositories.set(canonicalId, updatedSnapshot);
+
+            // Build path lookup
+            for (const pathItem of validPaths) {
+                this.pathToCanonicalId.set(pathItem, canonicalId);
+            }
+
+            // Populate legacy path-based state for backward compatibility
+            this.populateLegacyStateFromRepo(canonicalId, updatedSnapshot);
+        }
+
+        console.log(`[SNAPSHOT-DEBUG] Loaded ${this.repositories.size} repositories, ${this.indexedCodebases.length} indexed paths`);
+    }
+
+    /**
+     * Build v3 internal state from grouped repositories
+     */
+    private buildV3StateFromGroups(
+        groups: Map<string, { identity: RepoIdentity; paths: string[]; info: CodebaseInfo }>
+    ): void {
+        this.repositories.clear();
+        this.pathToCanonicalId.clear();
+        this.indexedCodebases = [];
+        this.indexingCodebases.clear();
+        this.codebaseFileCount.clear();
+        this.codebaseInfoMap.clear();
+
+        const now = new Date().toISOString();
+
+        for (const [canonicalId, group] of groups) {
+            const { identity, paths, info } = group;
+
+            // Determine worktrees
+            const worktrees = paths.filter(p => {
+                const pathIdentity = this.safeResolveIdentity(p);
+                return pathIdentity?.isWorktree || false;
+            });
+
+            // Create branch snapshot from the codebase info
+            const branchSnapshot: BranchSnapshot = {
+                status: info.status === 'indexed' ? 'indexed' :
+                        info.status === 'indexing' ? 'indexing' : 'indexfailed',
+                indexedFiles: 'indexedFiles' in info ? info.indexedFiles : 0,
+                totalChunks: 'totalChunks' in info ? info.totalChunks : 0,
+                lastIndexed: info.lastUpdated,
+                indexingPercentage: 'indexingPercentage' in info ? info.indexingPercentage : undefined,
+                errorMessage: 'errorMessage' in info ? info.errorMessage : undefined,
+            };
+
+            const repoSnapshot: RepoSnapshot = {
+                displayName: identity.displayName,
+                remoteUrl: identity.remoteUrl,
+                identitySource: identity.identitySource,
+                knownPaths: paths,
+                worktrees,
+                branches: { 'default': branchSnapshot },
+                defaultBranch: 'default',
+                lastIndexed: now,
+            };
+
+            this.repositories.set(canonicalId, repoSnapshot);
+
+            // Build path lookup
+            for (const pathItem of paths) {
+                this.pathToCanonicalId.set(pathItem, canonicalId);
+            }
+
+            // Populate legacy state
+            this.populateLegacyStateFromRepo(canonicalId, repoSnapshot);
+        }
+
+        console.log(`[SNAPSHOT-DEBUG] Migrated to v3: ${this.repositories.size} repositories, ${this.indexedCodebases.length} indexed paths`);
+    }
+
+    /**
+     * Populate legacy path-based state from a v3 repository record
+     */
+    private populateLegacyStateFromRepo(canonicalId: string, repo: RepoSnapshot): void {
+        const defaultBranch = repo.branches[repo.defaultBranch || 'default'];
+        if (!defaultBranch) return;
+
+        for (const pathItem of repo.knownPaths) {
+            // Create CodebaseInfo from branch snapshot
+            let info: CodebaseInfo;
+            if (defaultBranch.status === 'indexed') {
+                info = {
+                    status: 'indexed',
+                    indexedFiles: defaultBranch.indexedFiles,
+                    totalChunks: defaultBranch.totalChunks,
+                    indexStatus: 'completed',
+                    lastUpdated: defaultBranch.lastIndexed,
+                };
+                if (!this.indexedCodebases.includes(pathItem)) {
+                    this.indexedCodebases.push(pathItem);
+                }
+                this.codebaseFileCount.set(pathItem, defaultBranch.indexedFiles);
+            } else if (defaultBranch.status === 'indexing') {
+                info = {
+                    status: 'indexing',
+                    indexingPercentage: defaultBranch.indexingPercentage || 0,
+                    lastUpdated: defaultBranch.lastIndexed,
+                };
+                this.indexingCodebases.set(pathItem, defaultBranch.indexingPercentage || 0);
+            } else {
+                info = {
+                    status: 'indexfailed',
+                    errorMessage: defaultBranch.errorMessage || 'Unknown error',
+                    lastUpdated: defaultBranch.lastIndexed,
+                };
+            }
+
+            this.codebaseInfoMap.set(pathItem, info);
+        }
+    }
+
+    /**
+     * Create a path-based canonical ID (fallback when git identity fails)
+     */
+    private pathBasedCanonicalId(codebasePath: string): string {
+        const crypto = require('crypto');
+        return crypto.createHash('md5').update(path.resolve(codebasePath)).digest('hex');
+    }
+
+    /**
+     * Create a fallback identity when git resolution fails
+     */
+    private createFallbackIdentity(codebasePath: string): RepoIdentity {
+        return {
+            canonicalId: this.pathBasedCanonicalId(codebasePath),
+            detectedPaths: [codebasePath],
+            displayName: path.basename(codebasePath),
+            identitySource: 'path-hash',
+            isGitRepo: false,
+            isWorktree: false,
+        };
     }
 
     /**
@@ -144,13 +425,23 @@ export class SnapshotManager {
             const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
             const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
 
-            if (this.isV2Format(snapshot)) {
+            if (this.isV3Format(snapshot)) {
+                // V3 format: collect all paths from indexed repositories
+                const indexedPaths: string[] = [];
+                for (const repo of Object.values(snapshot.repositories)) {
+                    const defaultBranch = repo.branches[repo.defaultBranch || 'default'];
+                    if (defaultBranch?.status === 'indexed') {
+                        indexedPaths.push(...repo.knownPaths);
+                    }
+                }
+                return indexedPaths;
+            } else if (this.isV2Format(snapshot)) {
                 return Object.entries(snapshot.codebases)
                     .filter(([_, info]) => info.status === 'indexed')
                     .map(([path, _]) => path);
             } else {
                 // V1 format
-                return snapshot.indexedCodebases || [];
+                return (snapshot as CodebaseSnapshotV1).indexedCodebases || [];
             }
         } catch (error) {
             console.warn(`[SNAPSHOT-DEBUG] Error reading indexed codebases from file:`, error);
@@ -169,18 +460,29 @@ export class SnapshotManager {
             const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
             const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
 
-            if (this.isV2Format(snapshot)) {
+            if (this.isV3Format(snapshot)) {
+                // V3 format: collect all paths from indexing repositories
+                const indexingPaths: string[] = [];
+                for (const repo of Object.values(snapshot.repositories)) {
+                    const defaultBranch = repo.branches[repo.defaultBranch || 'default'];
+                    if (defaultBranch?.status === 'indexing') {
+                        indexingPaths.push(...repo.knownPaths);
+                    }
+                }
+                return indexingPaths;
+            } else if (this.isV2Format(snapshot)) {
                 return Object.entries(snapshot.codebases)
                     .filter(([_, info]) => info.status === 'indexing')
                     .map(([path, _]) => path);
             } else {
                 // V1 format - Handle both legacy array format and new object format
-                if (Array.isArray(snapshot.indexingCodebases)) {
+                const v1Snapshot = snapshot as CodebaseSnapshotV1;
+                if (Array.isArray(v1Snapshot.indexingCodebases)) {
                     // Legacy format: return the array directly
-                    return snapshot.indexingCodebases;
-                } else if (snapshot.indexingCodebases && typeof snapshot.indexingCodebases === 'object') {
+                    return v1Snapshot.indexingCodebases;
+                } else if (v1Snapshot.indexingCodebases && typeof v1Snapshot.indexingCodebases === 'object') {
                     // New format: return the keys of the object
-                    return Object.keys(snapshot.indexingCodebases);
+                    return Object.keys(v1Snapshot.indexingCodebases);
                 }
             }
 
@@ -209,7 +511,19 @@ export class SnapshotManager {
             const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
             const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
 
-            if (this.isV2Format(snapshot)) {
+            if (this.isV3Format(snapshot)) {
+                // V3 format: find repo containing this path and get branch progress
+                for (const repo of Object.values(snapshot.repositories)) {
+                    if (repo.knownPaths.includes(codebasePath)) {
+                        const defaultBranch = repo.branches[repo.defaultBranch || 'default'];
+                        if (defaultBranch?.status === 'indexing') {
+                            return defaultBranch.indexingPercentage || 0;
+                        }
+                        return undefined;
+                    }
+                }
+                return undefined;
+            } else if (this.isV2Format(snapshot)) {
                 const info = snapshot.codebases[codebasePath];
                 if (info && info.status === 'indexing') {
                     return info.indexingPercentage || 0;
@@ -217,12 +531,13 @@ export class SnapshotManager {
                 return undefined;
             } else {
                 // V1 format - Handle both legacy array format and new object format
-                if (Array.isArray(snapshot.indexingCodebases)) {
+                const v1Snapshot = snapshot as CodebaseSnapshotV1;
+                if (Array.isArray(v1Snapshot.indexingCodebases)) {
                     // Legacy format: if path exists in array, assume 0% progress
-                    return snapshot.indexingCodebases.includes(codebasePath) ? 0 : undefined;
-                } else if (snapshot.indexingCodebases && typeof snapshot.indexingCodebases === 'object') {
+                    return v1Snapshot.indexingCodebases.includes(codebasePath) ? 0 : undefined;
+                } else if (v1Snapshot.indexingCodebases && typeof v1Snapshot.indexingCodebases === 'object') {
                     // New format: return the actual progress percentage
-                    return snapshot.indexingCodebases[codebasePath];
+                    return v1Snapshot.indexingCodebases[codebasePath];
                 }
             }
 
@@ -353,7 +668,8 @@ export class SnapshotManager {
      */
     public setCodebaseIndexed(
         codebasePath: string,
-        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' }
+        stats: { indexedFiles: number; totalChunks: number; status: 'completed' | 'limit_reached' },
+        collectionName?: string
     ): void {
         // Add to indexed list if not already there
         if (!this.indexedCodebases.includes(codebasePath)) {
@@ -374,6 +690,24 @@ export class SnapshotManager {
             lastUpdated: new Date().toISOString()
         };
         this.codebaseInfoMap.set(codebasePath, info);
+
+        // Update v3 repository state with collectionName
+        if (collectionName) {
+            this.updateRepositoryState(codebasePath, 'default', {
+                status: 'indexed',
+                indexedFiles: stats.indexedFiles,
+                totalChunks: stats.totalChunks,
+            });
+            // Set collectionName on the repository
+            const canonicalId = this.pathToCanonicalId.get(codebasePath);
+            if (canonicalId) {
+                const repo = this.repositories.get(canonicalId);
+                if (repo) {
+                    repo.collectionName = collectionName;
+                    console.log(`[SNAPSHOT-DEBUG] Set collectionName '${collectionName}' for repo '${canonicalId}'`);
+                }
+            }
+        }
     }
 
     /**
@@ -449,15 +783,19 @@ export class SnapshotManager {
             const snapshotData = fs.readFileSync(this.snapshotFilePath, 'utf8');
             const snapshot: CodebaseSnapshot = JSON.parse(snapshotData);
 
-            console.log('[SNAPSHOT-DEBUG] Loaded snapshot:', snapshot);
+            console.log('[SNAPSHOT-DEBUG] Loaded snapshot format:',
+                this.isV3Format(snapshot) ? 'v3' :
+                this.isV2Format(snapshot) ? 'v2' : 'v1');
 
-            if (this.isV2Format(snapshot)) {
-                this.loadV2Format(snapshot);
+            if (this.isV3Format(snapshot)) {
+                this.loadV3Format(snapshot);
+            } else if (this.isV2Format(snapshot)) {
+                this.migrateV2ToV3(snapshot);
             } else {
-                this.loadV1Format(snapshot);
+                this.migrateV1ToV3(snapshot);
             }
 
-            // Always save in v2 format after loading (migration)
+            // Always save in v3 format after loading (migration)
             this.saveCodebaseSnapshot();
 
         } catch (error: any) {
@@ -477,30 +815,123 @@ export class SnapshotManager {
                 console.log('[SNAPSHOT-DEBUG] Created snapshot directory:', snapshotDir);
             }
 
-            // Build v2 format snapshot using the complete info map
-            const codebases: Record<string, CodebaseInfo> = {};
+            // Build v3 format snapshot from repositories
+            const repositories: Record<string, RepoSnapshot> = {};
 
-            // Add all codebases from the info map
-            for (const [codebasePath, info] of this.codebaseInfoMap) {
-                codebases[codebasePath] = info;
+            for (const [canonicalId, repoSnapshot] of this.repositories) {
+                repositories[canonicalId] = repoSnapshot;
             }
 
-            const snapshot: CodebaseSnapshotV2 = {
-                formatVersion: 'v2',
-                codebases: codebases,
+            const snapshot: CodebaseSnapshotV3 = {
+                formatVersion: 'v3',
+                repositories,
                 lastUpdated: new Date().toISOString()
             };
 
             fs.writeFileSync(this.snapshotFilePath, JSON.stringify(snapshot, null, 2));
 
+            const repoCount = this.repositories.size;
             const indexedCount = this.indexedCodebases.length;
             const indexingCount = this.indexingCodebases.size;
             const failedCount = this.getFailedCodebases().length;
 
-            console.log(`[SNAPSHOT-DEBUG] Snapshot saved successfully in v2 format. Indexed: ${indexedCount}, Indexing: ${indexingCount}, Failed: ${failedCount}`);
+            console.log(`[SNAPSHOT-DEBUG] Snapshot saved successfully in v3 format. Repos: ${repoCount}, Indexed paths: ${indexedCount}, Indexing: ${indexingCount}, Failed: ${failedCount}`);
 
         } catch (error: any) {
             console.error('[SNAPSHOT-DEBUG] Error saving snapshot:', error);
         }
+    }
+
+    // ==================== V3 API Methods ====================
+
+    /**
+     * Get repository snapshot by canonical ID
+     */
+    public getRepository(canonicalId: string): RepoSnapshot | undefined {
+        return this.repositories.get(canonicalId);
+    }
+
+    /**
+     * Get repository by path (resolves canonical ID first)
+     */
+    public getRepositoryByPath(codebasePath: string): RepoSnapshot | undefined {
+        const canonicalId = this.pathToCanonicalId.get(codebasePath);
+        if (canonicalId) {
+            return this.repositories.get(canonicalId);
+        }
+        return undefined;
+    }
+
+    /**
+     * Get all repositories
+     */
+    public getAllRepositories(): Map<string, RepoSnapshot> {
+        return new Map(this.repositories);
+    }
+
+    /**
+     * Get canonical ID for a path
+     */
+    public getCanonicalIdForPath(codebasePath: string): string | undefined {
+        return this.pathToCanonicalId.get(codebasePath);
+    }
+
+    /**
+     * Update repository state when indexing starts/completes
+     */
+    public updateRepositoryState(
+        codebasePath: string,
+        branchName: string = 'default',
+        branchState: Partial<BranchSnapshot>
+    ): void {
+        const identity = this.safeResolveIdentity(codebasePath);
+        const canonicalId = identity?.canonicalId || this.pathBasedCanonicalId(codebasePath);
+
+        let repo = this.repositories.get(canonicalId);
+        const now = new Date().toISOString();
+
+        if (!repo) {
+            // Create new repository record
+            repo = {
+                displayName: identity?.displayName || path.basename(codebasePath),
+                remoteUrl: identity?.remoteUrl,
+                identitySource: identity?.identitySource || 'path-hash',
+                knownPaths: [codebasePath],
+                worktrees: identity?.isWorktree ? [codebasePath] : [],
+                branches: {},
+                defaultBranch: branchName,
+                lastIndexed: now,
+            };
+            this.repositories.set(canonicalId, repo);
+            this.pathToCanonicalId.set(codebasePath, canonicalId);
+        } else {
+            // Update existing repository
+            if (!repo.knownPaths.includes(codebasePath)) {
+                repo.knownPaths.push(codebasePath);
+                this.pathToCanonicalId.set(codebasePath, canonicalId);
+            }
+            if (identity?.isWorktree && !repo.worktrees.includes(codebasePath)) {
+                repo.worktrees.push(codebasePath);
+            }
+        }
+
+        // Update branch state
+        const existingBranch = repo.branches[branchName] || {
+            status: 'indexing',
+            indexedFiles: 0,
+            totalChunks: 0,
+            lastIndexed: now,
+        };
+
+        repo.branches[branchName] = {
+            ...existingBranch,
+            ...branchState,
+            lastIndexed: now,
+        };
+
+        repo.lastIndexed = now;
+
+        // Update legacy state for backward compatibility
+        this.populateLegacyStateFromRepo(canonicalId, repo);
     }
 } 

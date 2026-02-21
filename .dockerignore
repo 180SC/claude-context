@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Build outputs (we build fresh in Docker)
+**/dist
+
+# Development files
+.git
+.gitignore
+.env
+.env.*
+*.log
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Documentation (not needed in image)
+docs/
+*.md
+!packages/*/README.md
+
+# Examples
+examples/
+
+# Tests
+**/__tests__
+**/*.test.ts
+**/*.spec.ts
+coverage/
+.jest/
+
+# Chrome extension (not needed for MCP server)
+packages/chrome-extension/
+
+# Scripts (not needed in image)
+scripts/
+
+# Misc
+.DS_Store
+Thumbs.db

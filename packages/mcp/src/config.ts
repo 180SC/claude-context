@@ -64,8 +64,66 @@ export interface CodebaseSnapshotV2 {
     lastUpdated: string;
 }
 
+// ==================== V3 Format ====================
+// Canonical-ID-keyed repository records with branch and worktree tracking
+
+/**
+ * Branch-specific snapshot information.
+ */
+export interface BranchSnapshot {
+    /** Branch status: indexed, indexing, or failed */
+    status: 'indexed' | 'indexing' | 'indexfailed';
+    /** Number of files indexed on this branch */
+    indexedFiles: number;
+    /** Total number of chunks generated for this branch */
+    totalChunks: number;
+    /** Last commit hash that was indexed */
+    lastCommit?: string;
+    /** Timestamp of last indexing */
+    lastIndexed: string;
+    /** Indexing progress (0-100) if status is 'indexing' */
+    indexingPercentage?: number;
+    /** Error message if status is 'indexfailed' */
+    errorMessage?: string;
+}
+
+/**
+ * Repository snapshot - stores information about a repository identified by canonical ID.
+ */
+export interface RepoSnapshot {
+    /** Human-readable name for the repository (e.g., "myproject" from github.com/user/myproject) */
+    displayName: string;
+    /** Normalized remote URL if available (e.g., "github.com/user/repo") */
+    remoteUrl?: string;
+    /** How the canonical ID was determined */
+    identitySource: 'remote-url' | 'initial-commit' | 'path-hash';
+    /** All known filesystem paths that map to this repository */
+    knownPaths: string[];
+    /** Paths that are git worktrees */
+    worktrees: string[];
+    /** Branch-specific indexing information */
+    branches: Record<string, BranchSnapshot>;
+    /** Default branch name (e.g., "main", "master") */
+    defaultBranch?: string;
+    /** Timestamp of last indexing activity for any branch */
+    lastIndexed: string;
+    /** Collection name in the vector database */
+    collectionName?: string;
+}
+
+/**
+ * V3 snapshot format - canonical-ID-keyed repository records.
+ */
+export interface CodebaseSnapshotV3 {
+    formatVersion: 'v3';
+    /** Repository records keyed by canonical ID */
+    repositories: Record<string, RepoSnapshot>;
+    /** Timestamp of last update */
+    lastUpdated: string;
+}
+
 // Union type for all supported formats
-export type CodebaseSnapshot = CodebaseSnapshotV1 | CodebaseSnapshotV2;
+export type CodebaseSnapshot = CodebaseSnapshotV1 | CodebaseSnapshotV2 | CodebaseSnapshotV3;
 
 // Helper function to get default model for each provider
 export function getDefaultModelForProvider(provider: string): string {

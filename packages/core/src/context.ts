@@ -22,6 +22,13 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { FileSynchronizer } from './sync/synchronizer';
+import {
+    CollectionMigrator,
+    CollectionNameResolution,
+    generateLegacyCollectionName,
+    generateCanonicalCollectionName,
+} from './identity/collection-migrator';
+import { resolveIdentity, RepoIdentity } from './identity/repo-identity';
 
 const DEFAULT_SUPPORTED_EXTENSIONS = [
     // Programming languages
@@ -96,6 +103,14 @@ export interface ContextConfig {
     customIgnorePatterns?: string[]; // New: custom ignore patterns from MCP
 }
 
+/**
+ * Cross-repository semantic search result with repo attribution
+ */
+export interface CrossRepoSearchResult extends SemanticSearchResult {
+    repoName: string;
+    repoCanonicalId: string;
+}
+
 export class Context {
     private embedding: Embedding;
     private vectorDatabase: VectorDatabase;
@@ -103,6 +118,8 @@ export class Context {
     private supportedExtensions: string[];
     private ignorePatterns: string[];
     private synchronizers = new Map<string, FileSynchronizer>();
+    private collectionMigrator: CollectionMigrator | null = null;
+    private migratorInitialized: boolean = false;
 
     constructor(config: ContextConfig = {}) {
         // Initialize services
@@ -230,6 +247,7 @@ export class Context {
 
     /**
      * Generate collection name based on codebase path and hybrid mode
+     * @deprecated Use resolveCollectionName() for canonical-identity-based naming with legacy fallback
      */
     public getCollectionName(codebasePath: string): string {
         const isHybrid = this.getIsHybrid();
@@ -237,6 +255,111 @@ export class Context {
         const hash = crypto.createHash('md5').update(normalizedPath).digest('hex');
         const prefix = isHybrid === true ? 'hybrid_code_chunks' : 'code_chunks';
         return `${prefix}_${hash.substring(0, 8)}`;
+    }
+
+    /**
+     * Initialize the collection migrator by loading existing collections.
+     * This should be called once on startup before using resolveCollectionName().
+     */
+    public async initializeCollectionMigrator(): Promise<void> {
+        if (this.migratorInitialized) {
+            return;
+        }
+
+        console.log('[Context] 🔧 Initializing collection migrator...');
+        this.collectionMigrator = new CollectionMigrator();
+
+        // Load existing collections from vector database
+        const existingCollections = await this.vectorDatabase.listCollections();
+        this.collectionMigrator.setExistingCollections(existingCollections);
+
+        this.migratorInitialized = true;
+        console.log(`[Context] ✅ Collection migrator initialized with ${existingCollections.length} existing collections`);
+    }
+
+    /**
+     * Resolve collection name with canonical-identity-based naming and legacy fallback.
+     *
+     * Strategy:
+     * 1. If a legacy (8-char path hash) collection exists for this path, use it (backward compat)
+     * 2. If no legacy collection exists, use canonical-ID-based name (12-char hash)
+     *
+     * This method requires initializeCollectionMigrator() to be called first.
+     * If the migrator is not initialized, falls back to legacy getCollectionName().
+     *
+     * @param codebasePath Codebase root path
+     * @returns Collection name resolution with metadata
+     */
+    public resolveCollectionName(codebasePath: string): CollectionNameResolution {
+        const isHybrid = this.getIsHybrid();
+
+        // If migrator not initialized, use legacy naming
+        if (!this.collectionMigrator) {
+            const legacyName = this.getCollectionName(codebasePath);
+            return {
+                collectionName: legacyName,
+                isLegacy: true,
+                legacyName,
+            };
+        }
+
+        return this.collectionMigrator.resolveCollectionName(codebasePath, isHybrid);
+    }
+
+    /**
+     * Resolve collection name asynchronously, initializing the migrator if needed.
+     * This is the preferred method for resolving collection names.
+     *
+     * @param codebasePath Codebase root path
+     * @returns Collection name resolution with metadata
+     */
+    public async resolveCollectionNameAsync(codebasePath: string): Promise<CollectionNameResolution> {
+        // Initialize migrator if not done
+        if (!this.migratorInitialized) {
+            await this.initializeCollectionMigrator();
+        }
+
+        return this.resolveCollectionName(codebasePath);
+    }
+
+    /**
+     * Get the repository identity for a codebase path.
+     *
+     * @param codebasePath Codebase root path
+     * @returns Repository identity information
+     */
+    public getRepoIdentity(codebasePath: string): RepoIdentity {
+        return resolveIdentity(codebasePath);
+    }
+
+    /**
+     * Get the collection migrator instance (for advanced usage).
+     */
+    public getCollectionMigrator(): CollectionMigrator | null {
+        return this.collectionMigrator;
+    }
+
+    /**
+     * Check if the collection migrator is initialized.
+     */
+    public isCollectionMigratorInitialized(): boolean {
+        return this.migratorInitialized;
+    }
+
+    /**
+     * Notify the migrator that a collection was created.
+     * Call this after creating a new collection.
+     */
+    public notifyCollectionCreated(collectionName: string): void {
+        this.collectionMigrator?.addCollection(collectionName);
+    }
+
+    /**
+     * Notify the migrator that a collection was dropped.
+     * Call this after dropping a collection.
+     */
+    public notifyCollectionDropped(collectionName: string): void {
+        this.collectionMigrator?.removeCollection(collectionName);
     }
 
     /**
@@ -526,6 +649,204 @@ export class Context {
     }
 
     /**
+     * Search across multiple collections (repositories) simultaneously.
+     * Fan out query to all provided collections, normalize scores, merge and re-rank.
+     *
+     * @param collectionInfos Array of { collectionName, repoName, repoCanonicalId }
+     * @param query Search query
+     * @param topK Number of results per collection (default: 10)
+     * @param totalLimit Total results to return after merging (default: 20)
+     * @param extensionFilter Optional file extension filter
+     * @param perCollectionTimeoutMs Timeout per collection in ms (default: 5000)
+     * @param totalTimeoutMs Total timeout in ms (default: 15000)
+     * @returns Merged, re-ranked results with repo attribution
+     */
+    async semanticSearchMulti(
+        collectionInfos: Array<{ collectionName: string; repoName: string; repoCanonicalId: string }>,
+        query: string,
+        topK: number = 10,
+        totalLimit: number = 20,
+        extensionFilter?: string[],
+        perCollectionTimeoutMs: number = 5000,
+        totalTimeoutMs: number = 15000
+    ): Promise<CrossRepoSearchResult[]> {
+        const isHybrid = this.getIsHybrid();
+        const searchType = isHybrid === true ? 'hybrid search' : 'semantic search';
+        console.log(`[Context] 🔍 Executing cross-repo ${searchType}: "${query}" across ${collectionInfos.length} collections`);
+
+        if (collectionInfos.length === 0) {
+            console.log(`[Context] ⚠️  No collections provided for cross-repo search`);
+            return [];
+        }
+
+        // Build filter expression from extensionFilter
+        let filterExpr: string | undefined = undefined;
+        if (Array.isArray(extensionFilter) && extensionFilter.length > 0) {
+            const cleaned = extensionFilter
+                .filter((v: any) => typeof v === 'string')
+                .map((v: string) => v.trim())
+                .filter((v: string) => v.length > 0 && v.startsWith('.'));
+            if (cleaned.length > 0) {
+                const quoted = cleaned.map((e: string) => `'${e}'`).join(', ');
+                filterExpr = `fileExtension in [${quoted}]`;
+            }
+        }
+
+        // Generate query embedding once (reuse for all collections)
+        console.log(`[Context] 🔍 Generating embeddings for query: "${query}"`);
+        const queryEmbedding: EmbeddingVector = await this.embedding.embed(query);
+        console.log(`[Context] ✅ Generated embedding vector with dimension: ${queryEmbedding.vector.length}`);
+
+        // Create timeout wrapper for individual collection search
+        const searchWithTimeout = async (
+            info: { collectionName: string; repoName: string; repoCanonicalId: string }
+        ): Promise<{ results: SemanticSearchResult[]; info: typeof info } | null> => {
+            return new Promise(async (resolve) => {
+                const timer = setTimeout(() => {
+                    console.warn(`[Context] ⏱️  Timeout searching collection: ${info.collectionName}`);
+                    resolve(null);
+                }, perCollectionTimeoutMs);
+
+                try {
+                    // Check if collection exists
+                    const hasCollection = await this.vectorDatabase.hasCollection(info.collectionName);
+                    if (!hasCollection) {
+                        console.log(`[Context] ⚠️  Collection '${info.collectionName}' does not exist, skipping`);
+                        clearTimeout(timer);
+                        resolve(null);
+                        return;
+                    }
+
+                    let results: SemanticSearchResult[] = [];
+
+                    if (isHybrid) {
+                        // Hybrid search
+                        const searchRequests: HybridSearchRequest[] = [
+                            {
+                                data: queryEmbedding.vector,
+                                anns_field: "vector",
+                                param: { "nprobe": 10 },
+                                limit: topK
+                            },
+                            {
+                                data: query,
+                                anns_field: "sparse_vector",
+                                param: { "drop_ratio_search": 0.2 },
+                                limit: topK
+                            }
+                        ];
+
+                        const searchResults: HybridSearchResult[] = await this.vectorDatabase.hybridSearch(
+                            info.collectionName,
+                            searchRequests,
+                            {
+                                rerank: {
+                                    strategy: 'rrf',
+                                    params: { k: 100 }
+                                },
+                                limit: topK,
+                                filterExpr
+                            }
+                        );
+
+                        results = searchResults.map(result => ({
+                            content: result.document.content,
+                            relativePath: result.document.relativePath,
+                            startLine: result.document.startLine,
+                            endLine: result.document.endLine,
+                            language: result.document.metadata.language || 'unknown',
+                            score: result.score
+                        }));
+                    } else {
+                        // Regular semantic search
+                        const searchResults: VectorSearchResult[] = await this.vectorDatabase.search(
+                            info.collectionName,
+                            queryEmbedding.vector,
+                            { topK, threshold: 0.3, filterExpr }
+                        );
+
+                        results = searchResults.map(result => ({
+                            content: result.document.content,
+                            relativePath: result.document.relativePath,
+                            startLine: result.document.startLine,
+                            endLine: result.document.endLine,
+                            language: result.document.metadata.language || 'unknown',
+                            score: result.score
+                        }));
+                    }
+
+                    clearTimeout(timer);
+                    resolve({ results, info });
+                } catch (error) {
+                    console.warn(`[Context] ⚠️  Error searching collection ${info.collectionName}:`, error);
+                    clearTimeout(timer);
+                    resolve(null);
+                }
+            });
+        };
+
+        // Create total timeout wrapper
+        const searchAllWithTotalTimeout = async (): Promise<CrossRepoSearchResult[]> => {
+            return new Promise(async (resolve) => {
+                const totalTimer = setTimeout(() => {
+                    console.warn(`[Context] ⏱️  Total timeout (${totalTimeoutMs}ms) reached for cross-repo search`);
+                    resolve([]);
+                }, totalTimeoutMs);
+
+                try {
+                    // Fan out to all collections in parallel
+                    const searchPromises = collectionInfos.map(info => searchWithTimeout(info));
+                    const allResults = await Promise.allSettled(searchPromises);
+
+                    // Collect successful results with their repo info
+                    const collectionResults: Array<{ results: SemanticSearchResult[]; info: { collectionName: string; repoName: string; repoCanonicalId: string } }> = [];
+
+                    for (const result of allResults) {
+                        if (result.status === 'fulfilled' && result.value !== null) {
+                            collectionResults.push(result.value);
+                        }
+                    }
+
+                    // Log collections that timed out or were not found
+                    const droppedCount = allResults.filter(r => r.status === 'fulfilled' && r.value === null).length;
+                    const failedCount = allResults.filter(r => r.status === 'rejected').length;
+                    console.log(`[Context] 📊 Got results from ${collectionResults.length}/${collectionInfos.length} collections` +
+                        (droppedCount > 0 ? ` (${droppedCount} timed out or missing)` : '') +
+                        (failedCount > 0 ? ` (${failedCount} failed)` : ''));
+
+                    // Use raw cosine similarity scores (already [0,1] and comparable across collections)
+                    const normalizedResults: CrossRepoSearchResult[] = [];
+
+                    for (const { results, info } of collectionResults) {
+                        for (const result of results) {
+                            normalizedResults.push({
+                                ...result,
+                                repoName: info.repoName,
+                                repoCanonicalId: info.repoCanonicalId
+                            });
+                        }
+                    }
+
+                    // Sort by raw score (descending) and take top totalLimit
+                    normalizedResults.sort((a, b) => b.score - a.score);
+                    const topResults = normalizedResults.slice(0, totalLimit);
+
+                    console.log(`[Context] ✅ Cross-repo search complete: ${topResults.length} results from ${collectionResults.length} repos`);
+
+                    clearTimeout(totalTimer);
+                    resolve(topResults);
+                } catch (error) {
+                    console.error(`[Context] ❌ Error in cross-repo search:`, error);
+                    clearTimeout(totalTimer);
+                    resolve([]);
+                }
+            });
+        };
+
+        return searchAllWithTotalTimeout();
+    }
+
+    /**
      * Clear index
      * @param codebasePath Codebase path to clear index for
      * @param progressCallback Optional progress callback function
@@ -545,6 +866,7 @@ export class Context {
 
         if (collectionExists) {
             await this.vectorDatabase.dropCollection(collectionName);
+            this.notifyCollectionDropped(collectionName);
         }
 
         // Delete snapshot file
@@ -639,6 +961,7 @@ export class Context {
         if (collectionExists && forceReindex) {
             console.log(`[Context] 🗑️  Dropping existing collection ${collectionName} for force reindex...`);
             await this.vectorDatabase.dropCollection(collectionName);
+            this.notifyCollectionDropped(collectionName);
             console.log(`[Context] ✅ Collection ${collectionName} dropped successfully`);
         }
 
@@ -653,6 +976,7 @@ export class Context {
             await this.vectorDatabase.createCollection(collectionName, dimension, `Index for ${dirName}`);
         }
 
+        this.notifyCollectionCreated(collectionName);
         console.log(`[Context] ✅ Collection ${collectionName} created successfully (dimension: ${dimension})`);
     }
 
