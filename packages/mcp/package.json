@@ -16,7 +16,7 @@
         "test:watch": "jest --watch",
         "test:coverage": "jest --coverage",
         "start": "tsx src/cli.ts",
-        "start:with-env": "OPENAI_API_KEY=${OPENAI_API_KEY:your-api-key-here} MILVUS_ADDRESS=${MILVUS_ADDRESS:localhost:19530} tsx src/index.ts",
+        "start:with-env": "OPENAI_API_KEY=${OPENAI_API_KEY:your-api-key-here} MILVUS_ADDRESS=${MILVUS_ADDRESS:localhost:19530} tsx src/cli.ts",
         "prepublishOnly": "pnpm build"
     },
     "dependencies": {
@@ -42,6 +42,9 @@
         "directory": "packages/mcp"
     },
     "license": "MIT",
+    "engines": {
+        "node": ">=20.0.0"
+    },
     "publishConfig": {
         "access": "public"
     }
