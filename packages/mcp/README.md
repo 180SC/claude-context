@@ -626,6 +626,9 @@ npx @zilliz/claude-context-mcp@latest
 - 🗄️ **Scalable**: Integrates with Zilliz Cloud for scalable vector search, no matter how large your codebase is
 - 🛠️ **Customizable**: Configure file extensions, ignore patterns, and embedding models
 - ⚡ **Real-time**: Interactive indexing and searching with progress feedback
+- 🌐 **HTTP Transport**: Network-accessible via Streamable HTTP with bearer token auth and rate limiting
+- 🔀 **Multi-Session Concurrency**: Per-session server isolation allows multiple LLMs to connect simultaneously
+- 🔎 **Cross-Repo Search**: `search_all` tool searches across all indexed repositories in parallel with cloud fallback for Docker deployments
 
 ## Available Tools
 
@@ -667,6 +670,38 @@ Get the current indexing status of a codebase. Shows progress percentage for act
 **Parameters:**
 
 - `path` (required): Absolute path to the codebase directory to check status for
+
+### 5. `search_all`
+
+Search across ALL indexed repositories simultaneously using natural language queries. Fans out the query to all indexed collections in parallel, normalizes scores per collection, and merges/re-ranks results globally.
+
+**Parameters:**
+
+- `query` (required): Natural language query to search for across all indexed repositories
+- `limit` (optional): Maximum total number of results to return (default: 20, max: 50)
+- `repos` (optional): Filter to specific repository names or canonical IDs (default: all)
+- `extensionFilter` (optional): List of file extensions to filter results (e.g., ['.ts', '.py']) (default: [])
+
+> **Note:** When running in Docker (where host filesystem paths are not accessible), `search_all` automatically falls back to cloud-discovered collections from Zilliz Cloud. This allows it to search across all indexed codebases without requiring a local snapshot.
+
+## HTTP Transport & Multi-Session Support
+
+The MCP server supports HTTP transport for network access, enabling multiple AI agents/LLMs to connect concurrently.
+
+```bash
+# Start in HTTP mode
+MCP_AUTH_TOKEN=xxx npx @zilliz/claude-context-mcp --transport http --port 3100
+```
+
+Each HTTP session gets its own isolated MCP server instance, so multiple LLMs can search simultaneously without interference. See the [Deployment Guide](../../docs/deployment.md) for Docker Compose setup, authentication, rate limiting, and production configuration.
+
+**Key environment variables for HTTP mode:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCP_AUTH_TOKEN` | Bearer token for authentication (required) | — |
+| `MCP_RATE_LIMIT` | Requests per minute per client IP | `60` |
+| `MCP_PORT` | HTTP server port | `3100` |
 
 ## Contributing
 
