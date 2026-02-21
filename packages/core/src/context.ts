@@ -807,36 +807,27 @@ export class Context {
                         }
                     }
 
-                    console.log(`[Context] 📊 Got results from ${collectionResults.length}/${collectionInfos.length} collections`);
+                    // Log collections that timed out or were not found
+                    const droppedCount = allResults.filter(r => r.status === 'fulfilled' && r.value === null).length;
+                    const failedCount = allResults.filter(r => r.status === 'rejected').length;
+                    console.log(`[Context] 📊 Got results from ${collectionResults.length}/${collectionInfos.length} collections` +
+                        (droppedCount > 0 ? ` (${droppedCount} timed out or missing)` : '') +
+                        (failedCount > 0 ? ` (${failedCount} failed)` : ''));
 
-                    // Normalize scores per collection (min-max to [0,1])
+                    // Use raw cosine similarity scores (already [0,1] and comparable across collections)
                     const normalizedResults: CrossRepoSearchResult[] = [];
 
                     for (const { results, info } of collectionResults) {
-                        if (results.length === 0) continue;
-
-                        // Find min and max scores for this collection
-                        const scores = results.map(r => r.score);
-                        const minScore = Math.min(...scores);
-                        const maxScore = Math.max(...scores);
-                        const scoreRange = maxScore - minScore;
-
                         for (const result of results) {
-                            // Normalize score to [0,1] - if all scores are the same, use 1.0
-                            const normalizedScore = scoreRange > 0
-                                ? (result.score - minScore) / scoreRange
-                                : 1.0;
-
                             normalizedResults.push({
                                 ...result,
-                                score: normalizedScore,
                                 repoName: info.repoName,
                                 repoCanonicalId: info.repoCanonicalId
                             });
                         }
                     }
 
-                    // Sort by normalized score (descending) and take top totalLimit
+                    // Sort by raw score (descending) and take top totalLimit
                     normalizedResults.sort((a, b) => b.score - a.score);
                     const topResults = normalizedResults.slice(0, totalLimit);
 

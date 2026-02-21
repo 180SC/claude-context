@@ -932,11 +932,14 @@ export class ToolHandlers {
                 }
             }
 
-            // CLOUD FALLBACK: If local snapshot yielded nothing, use cloud-discovered collections
-            if (collectionsToSearch.length === 0 && cloudCollectionMap.size > 0) {
-                console.log(`[SEARCH-ALL] Local snapshot empty, using ${cloudCollectionMap.size} cloud-discovered collections as fallback`);
+            // ALWAYS merge cloud-discovered collections (search_all = cloud by definition)
+            if (cloudCollectionMap.size > 0) {
+                const existingCollections = new Set(collectionsToSearch.map(c => c.collectionName));
+                let cloudAdded = 0;
 
                 for (const [collectionName, codebasePath] of cloudCollectionMap) {
+                    if (existingCollections.has(collectionName)) continue;
+
                     const repoName = path.basename(codebasePath);
 
                     // Apply repo filter if provided
@@ -953,6 +956,11 @@ export class ToolHandlers {
                         repoName,
                         repoCanonicalId: collectionName,
                     });
+                    cloudAdded++;
+                }
+
+                if (cloudAdded > 0) {
+                    console.log(`[SEARCH-ALL] Added ${cloudAdded} cloud-discovered collections not in local snapshot`);
                 }
             }
 
