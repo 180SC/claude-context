@@ -64,5 +64,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Default to stdio transport (compatible with MCP clients)
 # Override with --transport http for HTTP mode
-ENTRYPOINT ["node", "packages/mcp/dist/index.js"]
+ENTRYPOINT ["node", "packages/mcp/dist/cli.js"]
 CMD ["--transport", "stdio"]
