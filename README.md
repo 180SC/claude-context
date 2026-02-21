@@ -1,118 +1,52 @@
 ![](assets/claude-context.png)
 
-### Your entire codebase as Claude's context
+# Claude Context
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Node.js](https://img.shields.io/badge/Node.js-20%2B-green.svg)](https://nodejs.org/)
-[![Documentation](https://img.shields.io/badge/Documentation-📚-orange.svg)](docs/)
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/zilliz.semanticcodesearch?label=VS%20Code%20Extension&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=zilliz.semanticcodesearch)
-[![npm - core](https://img.shields.io/npm/v/@zilliz/claude-context-core?label=%40zilliz%2Fclaude-context-core&logo=npm)](https://www.npmjs.com/package/@zilliz/claude-context-core)
-[![npm - mcp](https://img.shields.io/npm/v/@zilliz/claude-context-mcp?label=%40zilliz%2Fclaude-context-mcp&logo=npm)](https://www.npmjs.com/package/@zilliz/claude-context-mcp)
-[![Twitter](https://img.shields.io/twitter/url/https/twitter.com/zilliz_universe.svg?style=social&label=Follow%20%40Zilliz)](https://twitter.com/zilliz_universe)
-[![DeepWiki](https://img.shields.io/badge/DeepWiki-AI%20Docs-purple.svg?logo=gitbook&logoColor=white)](https://deepwiki.com/zilliztech/claude-context)
-<a href="https://discord.gg/mKc3R95yE5"><img height="20" src="https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white" alt="discord" /></a>
-</div>
+MCP server that gives Claude Code semantic search across your codebases. Index a repo once, then search it with natural language — across all your projects at once.
 
-**Claude Context** is an MCP plugin that adds semantic code search to Claude Code and other AI coding agents, giving them deep context from your entire codebase.
+If you work across multiple repositories, this is especially useful. Instead of Claude only knowing the repo you're currently in, `search_all` lets it search every codebase you've indexed in parallel. Find how you implemented auth in one project while working in another, reuse patterns across your stack, or spot inconsistencies before they become problems.
 
-🧠 **Your Entire Codebase as Context**: Claude Context uses semantic search to find all relevant code from millions of lines. No multi-round discovery needed. It brings results straight into the Claude's context.
+Fork of [zilliztech/claude-context](https://github.com/zilliztech/claude-context). This fork fixes cross-repo search ranking (upstream normalized scores per-collection, breaking cross-repo comparisons), always merges cloud-discovered repos into `search_all` results, and restructures the MCP package for cleaner builds. An HTTP transport mode has also been added for remote and multi-session scenarios (bearer token auth, rate limiting) — this is under active development.
 
-💰 **Cost-Effective for Large Codebases**: Instead of loading entire directories into Claude for every request, which can be very expensive, Claude Context efficiently stores your codebase in a vector database and only uses related code in context to keep your costs manageable.
+## How It Works
 
----
-
-## 🚀 Demo
-
-![img](https://lh7-rt.googleusercontent.com/docsz/AD_4nXf2uIf2c5zowp-iOMOqsefHbY_EwNGiutkxtNXcZVJ8RI6SN9DsCcsc3amXIhOZx9VcKFJQLSAqM-2pjU9zoGs1r8GCTUL3JIsLpLUGAm1VQd5F2o5vpEajx2qrc77iXhBu1zWj?key=qYdFquJrLcfXCUndY-YRBQ)
-
-Model Context Protocol (MCP) allows you to integrate Claude Context with your favorite AI coding assistants, e.g. Claude Code.
+1. **Index** — Point the server at a codebase directory. It parses your code using AST-aware splitting (TypeScript, Python, Java, Go, Rust, C++, C#, Scala, with fallback for other languages), generates embeddings, and stores them in Zilliz Cloud.
+2. **Search** — Ask a natural language question. The server runs hybrid search (BM25 + dense vector) and returns ranked code snippets with file locations.
+3. **Cross-repo search** — `search_all` fans out your query to every indexed repo in parallel, so you can find patterns across your entire codebase collection.
 
 ## Quick Start
 
-### Prerequisites
+### What you need
 
-<details>
-<summary>Get a free vector database on Zilliz Cloud 👈</summary>
-
-Claude Context needs a vector database. You can [sign up](https://cloud.zilliz.com/signup?utm_source=github&utm_medium=referral&utm_campaign=2507-codecontext-readme) on Zilliz Cloud to get an API key.
+- **Node.js 20+** (check with `node --version`)
+- **OpenAI API key** — for embeddings ([platform.openai.com/api-keys](https://platform.openai.com/api-keys))
+- **Zilliz Cloud account** — [sign up free](https://cloud.zilliz.com/signup?utm_source=github&utm_medium=referral&utm_campaign=2507-codecontext-readme), then copy your Personal Key
 
 ![](assets/signup_and_get_apikey.png)
 
-Copy your Personal Key to replace `your-zilliz-cloud-api-key` in the configuration examples.
-</details>
-
-<details>
-<summary>Get OpenAI API Key for embedding model</summary>
-
-You need an OpenAI API key for the embedding model. You can get one by signing up at [OpenAI](https://platform.openai.com/api-keys).  
-
-Your API key will look like this: it always starts with `sk-`.  
-Copy your key and use it in the configuration examples below as `your-openai-api-key`.
-
-</details>
-
-### Configure MCP for Claude Code
-
-**System Requirements:**
-
-- Node.js >= 20.0.0 and < 24.0.0
-
-> Claude Context is not compatible with Node.js 24.0.0, you need downgrade it first if your node version is greater or equal to 24.
-
-#### Configuration
-
-Use the command line interface to add the Claude Context MCP server:
+### Install from source
 
 ```bash
-claude mcp add claude-context \
-  -e OPENAI_API_KEY=sk-your-openai-api-key \
-  -e MILVUS_TOKEN=your-zilliz-cloud-api-key \
-  -- npx @zilliz/claude-context-mcp@latest
+git clone https://github.com/180sc/claude-context.git
+cd claude-context
+nvm use 20     # or ensure node 20+ is active
+pnpm install
+pnpm build
 ```
 
-See the [Claude Code MCP documentation](https://docs.anthropic.com/en/docs/claude-code/mcp) for more details about MCP server management.
+### Configure Claude Code
 
-### Other MCP Client Configurations
-
-<details>
-<summary><strong>OpenAI Codex CLI</strong></summary>
-
-Codex CLI uses TOML configuration files:
-
-1. Create or edit the `~/.codex/config.toml` file.
-
-2. Add the following configuration:
-
-```toml
-# IMPORTANT: the top-level key is `mcp_servers` rather than `mcpServers`.
-[mcp_servers.claude-context]
-command = "npx"
-args = ["@zilliz/claude-context-mcp@latest"]
-env = { "OPENAI_API_KEY" = "your-openai-api-key", "MILVUS_TOKEN" = "your-zilliz-cloud-api-key" }
-# Optional: override the default 10s startup timeout
-startup_timeout_ms = 20000
-```
-
-3. Save the file and restart Codex CLI to apply the changes.
-
-</details>
-
-<details>
-<summary><strong>Gemini CLI</strong></summary>
-
-Gemini CLI requires manual configuration through a JSON file:
-
-1. Create or edit the `~/.gemini/settings.json` file.
-2. Add the following configuration:
+Add the MCP server to your `~/.claude.json` under the top-level `"mcpServers"` key:
 
 ```json
 {
   "mcpServers": {
     "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
+      "command": "/path/to/claude-context/packages/mcp/start-stdio.sh",
+      "args": [],
       "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
+        "OPENAI_API_KEY": "sk-your-openai-api-key",
+        "MILVUS_ADDRESS": "https://your-cluster.cloud.zilliz.com",
         "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
       }
     }
@@ -120,634 +54,245 @@ Gemini CLI requires manual configuration through a JSON file:
 }
 ```
 
-3. Save the file and restart Gemini CLI to apply the changes.
+Replace `/path/to/claude-context` with the absolute path to where you cloned the repo. The `start-stdio.sh` script handles nvm and runs the compiled server.
 
-</details>
+Restart Claude Code. You should see `claude-context` in your available MCP tools.
 
-<details>
-<summary><strong>Qwen Code</strong></summary>
+### Try it out
 
-Create or edit the `~/.qwen/settings.json` file and add the following configuration:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Cursor</strong></summary>
-
-<a href="https://cursor.com/install-mcp?name=claude-context&config=JTdCJTIyY29tbWFuZCUyMiUzQSUyMm5weCUyMC15JTIwJTQwemlsbGl6JTJGY29kZS1jb250ZXh0LW1jcCU0MGxhdGVzdCUyMiUyQyUyMmVudiUyMiUzQSU3QiUyMk9QRU5BSV9BUElfS0VZJTIyJTNBJTIyeW91ci1vcGVuYWktYXBpLWtleSUyMiUyQyUyMk1JTFZVU19BRERSRVNTJTIyJTNBJTIybG9jYWxob3N0JTNBMTk1MzAlMjIlN0QlN0Q%3D"><img src="https://cursor.com/deeplink/mcp-install-dark.svg" alt="Add claude-context MCP server to Cursor" height="32" /></a>
-
-Go to: `Settings` -> `Cursor Settings` -> `MCP` -> `Add new global MCP server`
-
-Pasting the following configuration into your Cursor `~/.cursor/mcp.json` file is the recommended approach. You may also install in a specific project by creating `.cursor/mcp.json` in your project folder. See [Cursor MCP docs](https://docs.cursor.com/context/model-context-protocol) for more info.
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Void</strong></summary>
-
-Go to: `Settings` -> `MCP` -> `Add MCP Server`
-
-Add the following configuration to your Void MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "code-context": {
-      "command": "npx",
-      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Claude Desktop</strong></summary>
-
-Add to your Claude Desktop configuration:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Windsurf</strong></summary>
-
-Windsurf supports MCP configuration through a JSON file. Add the following configuration to your Windsurf MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>VS Code</strong></summary>
-
-The Claude Context MCP server can be used with VS Code through MCP-compatible extensions. Add the following configuration to your VS Code MCP settings:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Cherry Studio</strong></summary>
-
-Cherry Studio allows for visual MCP server configuration through its settings interface. While it doesn't directly support manual JSON configuration, you can add a new server via the GUI:
-
-1. Navigate to **Settings → MCP Servers → Add Server**.
-2. Fill in the server details:
-   - **Name**: `claude-context`
-   - **Type**: `STDIO`
-   - **Command**: `npx`
-   - **Arguments**: `["@zilliz/claude-context-mcp@latest"]`
-   - **Environment Variables**:
-     - `OPENAI_API_KEY`: `your-openai-api-key`
-     - `MILVUS_ADDRESS`: `your-zilliz-cloud-public-endpoint`
-     - `MILVUS_TOKEN`: `your-zilliz-cloud-api-key`
-3. Save the configuration to activate the server.
-
-</details>
-
-<details>
-<summary><strong>Cline</strong></summary>
-
-Cline uses a JSON configuration file to manage MCP servers. To integrate the provided MCP server configuration:
-
-1. Open Cline and click on the **MCP Servers** icon in the top navigation bar.
-
-2. Select the **Installed** tab, then click **Advanced MCP Settings**.
-
-3. In the `cline_mcp_settings.json` file, add the following configuration:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-4. Save the file.
-
-</details>
-
-<details>
-<summary><strong>Augment</strong></summary>
-
-To configure Claude Context MCP in Augment Code, you can use either the graphical interface or manual configuration.
-
-#### **A. Using the Augment Code UI**
-
-1. Click the hamburger menu.
-
-2. Select **Settings**.
-
-3. Navigate to the **Tools** section.
-
-4. Click the **+ Add MCP** button.
-
-5. Enter the following command:
-
-   ```
-   npx @zilliz/claude-context-mcp@latest
-   ```
-
-6. Name the MCP: **Claude Context**.
-
-7. Click the **Add** button.
-
-------
-
-#### **B. Manual Configuration**
-
-1. Press Cmd/Ctrl Shift P or go to the hamburger menu in the Augment panel
-2. Select Edit Settings
-3. Under Advanced, click Edit in settings.json
-4. Add the server configuration to the `mcpServers` array in the `augment.advanced` object
-
-```json
-"augment.advanced": { 
-  "mcpServers": [ 
-    { 
-      "name": "claude-context", 
-      "command": "npx", 
-      "args": ["-y", "@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  ]
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Roo Code</strong></summary>
-
-Roo Code utilizes a JSON configuration file for MCP servers:
-
-1. Open Roo Code and navigate to **Settings → MCP Servers → Edit Global Config**.
-
-2. In the `mcp_settings.json` file, add the following configuration:
-
-```json
-{
-  "mcpServers": {
-    "claude-context": {
-      "command": "npx",
-      "args": ["@zilliz/claude-context-mcp@latest"],
-      "env": {
-        "OPENAI_API_KEY": "your-openai-api-key",
-        "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-      }
-    }
-  }
-}
-```
-
-3. Save the file to activate the server.
-
-</details>
-
-<details>
-<summary><strong>Zencoder</strong></summary>
-
-Zencoder offers support for MCP tools and servers in both its JetBrains and VS Code plugin versions.
-
-1. Go to the Zencoder menu (...)
-2. From the dropdown menu, select `Tools`
-3. Click on the `Add Custom MCP`
-4. Add the name (i.e. `Claude Context` and server configuration from below, and make sure to hit the `Install` button
-
-```json
-{
-    "command": "npx",
-    "args": ["@zilliz/claude-context-mcp@latest"],
-    "env": {
-      "OPENAI_API_KEY": "your-openai-api-key",
-      "MILVUS_ADDRESS": "your-zilliz-cloud-public-endpoint",
-      "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
-    }
-}
+Once Claude Code restarts, you can use these tools in conversation:
 
 ```
+1. Index a repo:     index_codebase path="/home/you/projects/my-app"
+2. Search it:        search_code path="/home/you/projects/my-app" query="authentication middleware"
+3. Search all repos: search_all query="error handling patterns"
+```
 
-5. Save the server by hitting the `Install` button.
+## Available Tools
 
-</details>
+### `index_codebase`
+
+Index a codebase directory for semantic search.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `path` | Yes | Absolute path to the codebase directory |
+| `force` | No | Force re-index even if already indexed (default: false) |
+| `splitter` | No | `ast` (syntax-aware, default) or `langchain` (character-based) |
+| `customExtensions` | No | Extra file extensions, e.g. `[".vue", ".svelte"]` |
+| `ignorePatterns` | No | Extra ignore globs, e.g. `["static/**", "*.tmp"]` |
+
+### `search_code`
+
+Search a single indexed repo with natural language.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `path` | Yes | Absolute path to the indexed codebase |
+| `query` | Yes | Natural language search query |
+| `limit` | No | Max results (default: 10, max: 50) |
+| `extensionFilter` | No | Filter by extension, e.g. `[".ts", ".py"]` |
+
+### `search_all`
+
+Search across ALL indexed repositories at once.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `query` | Yes | Natural language search query |
+| `limit` | No | Max total results (default: 20, max: 50) |
+| `repos` | No | Filter to specific repo names or IDs |
+| `extensionFilter` | No | Filter by extension, e.g. `[".ts", ".py"]` |
+
+`search_all` discovers repos from two sources — the local snapshot (maintained as you index) and Zilliz Cloud (by listing collections directly). Both are always merged, so repos are found even if the local snapshot is stale.
+
+Results are ranked by raw cosine similarity, so a strong match in one repo ranks higher than a weak match in another regardless of which repo it came from.
+
+**`search_all` vs `search_code`:**
+
+| | `search_code` | `search_all` |
+|---|---|---|
+| **Scope** | Single repo (by path) | All indexed repos |
+| **Best for** | Focused work in one codebase | Finding patterns across projects |
+| **Requires** | Absolute path | Nothing — auto-discovers repos |
+| **Performance** | Fast (single collection) | Slightly slower (parallel fan-out, 5s/collection timeout) |
+
+**Good to know:**
+- Requires Zilliz Cloud (each repo = separate collection; local FAISS only supports one).
+- Collections that take >5s are skipped. Check server logs if results seem incomplete.
+- Use the `repos` filter to narrow to specific projects.
+
+### `clear_index`
+
+Remove the search index for a codebase.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `path` | Yes | Absolute path to the codebase to clear |
+
+### `get_indexing_status`
+
+Check indexing progress or completion status.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `path` | Yes | Absolute path to the codebase to check |
+
+## `search_all` Examples
+
+**Learn from your own repos.** The real power of cross-repo search is finding how you (or your team) already solved something. Instead of Googling for generic patterns, search your own codebases first:
+
+```
+search_all query="Makefile with help target and section headers"
+search_all query="Docker Compose with health checks"
+search_all query="retry logic with exponential backoff"
+search_all query="database migration pattern"
+```
+
+**Find best practices across projects.** When you're about to build something, see how your other repos handle it:
+
+```
+search_all query="error handling middleware"
+search_all query="authentication and authorization flow"
+search_all query="CI/CD pipeline configuration"
+search_all query="environment variable configuration and validation"
+search_all query="WebSocket connection management"
+search_all query="rate limiting implementation"
+```
+
+**Spot code smells and inconsistencies.** Search for patterns you want to standardize or clean up:
+
+```
+search_all query="hardcoded API URLs or secrets"
+search_all query="TODO or FIXME or HACK comments"
+search_all query="bare except or catch without specific error type"
+search_all query="sleep or setTimeout used for synchronization"
+search_all query="deprecated function calls"
+```
+
+**Understand how a concept is implemented differently.** Compare approaches across repos:
+
+```
+search_all query="logging setup and configuration"
+search_all query="test fixtures and factory patterns"
+search_all query="API client wrapper or SDK initialization"
+search_all query="caching strategy"
+```
+
+**Narrow to specific repos or file types when you know where to look:**
+
+```
+search_all query="deployment configuration" repos=["stream-ops", "virtius-ai"]
+search_all query="data model definitions" extensionFilter=[".py"]
+search_all query="type definitions and interfaces" extensionFilter=[".ts"]
+```
+
+## Embedding Providers
+
+The default is OpenAI (`text-embedding-3-small`). Set `EMBEDDING_PROVIDER` to switch.
+
+| Provider | Key env var | Default model |
+|----------|------------|---------------|
+| OpenAI | `OPENAI_API_KEY` | `text-embedding-3-small` |
+| VoyageAI | `VOYAGEAI_API_KEY` | `voyage-code-3` |
+| Gemini | `GEMINI_API_KEY` | `gemini-embedding-001` |
+| Ollama | (local, no key) | `nomic-embed-text` |
+
+Set `EMBEDDING_MODEL` to override the default model for any provider.
 
 <details>
-<summary><strong>LangChain/LangGraph</strong></summary>
+<summary><strong>Provider setup details</strong></summary>
 
-For LangChain/LangGraph integration examples, see [this example](https://github.com/zilliztech/claude-context/blob/643796a0d30e706a2a0dff3d55621c9b5d831807/evaluation/retrieval/custom.py#L88).
+**OpenAI** — Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Supports `text-embedding-3-small`, `text-embedding-3-large`, and others. Set `OPENAI_BASE_URL` for Azure OpenAI or compatible services.
+
+**VoyageAI** — Get a key at [dash.voyageai.com](https://dash.voyageai.com/). Specialized for code embeddings.
+
+**Gemini** — Get a key at [aistudio.google.com](https://aistudio.google.com/). Good multilingual support. Set `GEMINI_BASE_URL` for custom endpoints.
+
+**Ollama** — Install from [ollama.ai](https://ollama.ai/), then `ollama pull nomic-embed-text && ollama serve`. Set `OLLAMA_HOST` if not running on `127.0.0.1:11434`.
 
 </details>
+
+> For the full list of environment variables, see the [Environment Variables Guide](docs/getting-started/environment-variables.md).
+
+## Features
+
+- **Hybrid search** — BM25 + dense vector for better recall than either alone
+- **AST-aware chunking** — Syntax-aware splitting for TypeScript, Python, Java, Go, Rust, C++, C#, Scala (automatic fallback for other languages)
+- **Incremental indexing** — Only re-indexes changed files using Merkle trees
+- **Cross-repo search** — `search_all` searches every indexed repo in parallel
+- **Scalable** — Zilliz Cloud handles codebases of any size
+- **HTTP transport** — Network-accessible with bearer token auth and rate limiting ([deployment guide](docs/deployment.md))
+- **Multi-session** — Multiple LLMs can connect simultaneously via isolated HTTP sessions
+
+## Optional Configuration
+
+```bash
+# Tune embedding throughput (default: 100)
+EMBEDDING_BATCH_SIZE=512
+
+# Include extra file types beyond defaults
+CUSTOM_EXTENSIONS=.vue,.svelte,.astro,.twig
+
+# Exclude extra patterns beyond defaults
+CUSTOM_IGNORE_PATTERNS=temp/**,*.backup,private/**,uploads/**
+```
+
+For file inclusion and exclusion rules, see the [File Inclusion & Exclusion Guide](docs/dive-deep/file-inclusion-rules.md).
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `node --version` shows < 20 | Install Node 20+ or use `nvm use 20` |
+| Missing API key errors | Check `OPENAI_API_KEY` and `MILVUS_TOKEN` are set in `~/.claude.json` |
+| Indexing seems slow | Normal for first run on large repos; subsequent runs only re-index changed files |
+| `search_all` returns no results | Requires Zilliz Cloud — local FAISS only supports single-repo `search_code` |
+| `search_all` missing some repos | Collections with >5s response time are skipped; check server logs |
+
+For more: [Troubleshooting Guide](docs/troubleshooting/troubleshooting-guide.md) and [FAQ](docs/troubleshooting/faq.md).
 
 <details>
 <summary><strong>Other MCP Clients</strong></summary>
 
-The server uses stdio transport and follows the standard MCP protocol. It can be integrated with any MCP-compatible client by running:
+The server uses stdio transport and follows the standard MCP protocol. Any MCP-compatible client can use it. The basic pattern for JSON-based configs:
 
-```bash
-npx @zilliz/claude-context-mcp@latest
+```json
+{
+  "mcpServers": {
+    "claude-context": {
+      "command": "npx",
+      "args": ["@zilliz/claude-context-mcp@latest"],
+      "env": {
+        "OPENAI_API_KEY": "your-openai-api-key",
+        "MILVUS_TOKEN": "your-zilliz-cloud-api-key"
+      }
+    }
+  }
+}
 ```
+
+Tested with: Cursor, VS Code, Windsurf, Claude Desktop, Cline, Roo Code, Cherry Studio, Augment, Zencoder, Qwen Code, OpenAI Codex CLI, Gemini CLI, and LangChain/LangGraph.
+
+For client-specific paths and quirks, see the [upstream README](https://github.com/zilliztech/claude-context/blob/master/packages/mcp/README.md).
 
 </details>
 
----
+## Architecture
 
-### Usage in Your Codebase
+This is a monorepo with three packages:
 
-1. **Open Claude Code**
+- **`packages/core`** — Indexing engine with embedding and vector database integration
+- **`packages/mcp`** — MCP server for AI agent integration ([package docs](packages/mcp/README.md))
+- **`packages/vscode-extension`** — VS Code extension for semantic code search ([marketplace](https://marketplace.visualstudio.com/items?itemName=zilliz.semanticcodesearch))
 
-   ```
-   cd your-project-directory
-   claude
-   ```
+## Contributing
 
-2. **Index your codebase**:
+This is a fork of [zilliztech/claude-context](https://github.com/zilliztech/claude-context). See:
 
-   ```
-   Index this codebase
-   ```
+- [Contributing Guide](CONTRIBUTING.md)
+- [MCP Package Contributing](packages/mcp/CONTRIBUTING.md)
 
-3. **Check indexing status**:
+## License
 
-   ```
-   Check the indexing status
-   ```
-
-4. **Start searching**:
-
-   ```
-   Find functions that handle user authentication
-   ```
-
-🎉 **That's it!** You now have semantic code search in Claude Code.
-
----
-
-### Environment Variables Configuration
-
-For more detailed MCP environment variable configuration, see our [Environment Variables Guide](docs/getting-started/environment-variables.md).
-
-### Using Different Embedding Models
-
-To configure custom embedding models (e.g., `text-embedding-3-large` for OpenAI, `voyage-code-3` for VoyageAI), see the [MCP Configuration Examples](packages/mcp/README.md#embedding-provider-configuration) for detailed setup instructions for each provider.
-
-### File Inclusion & Exclusion Rules
-
-For detailed explanation of file inclusion and exclusion rules, and how to customize them, see our [File Inclusion & Exclusion Rules](docs/dive-deep/file-inclusion-rules.md).
-
-### Available Tools
-
-#### 1. `index_codebase`
-
-Index a codebase directory for hybrid search (BM25 + dense vector).
-
-#### 2. `search_code`
-
-Search the indexed codebase using natural language queries with hybrid search (BM25 + dense vector).
-
-#### 3. `clear_index`
-
-Clear the search index for a specific codebase.
-
-#### 4. `get_indexing_status`
-
-Get the current indexing status of a codebase. Shows progress percentage for actively indexing codebases and completion status for indexed codebases.
-
----
-
-## 📊 Evaluation
-
-Our controlled evaluation demonstrates that Claude Context MCP achieves ~40% token reduction under the condition of equivalent retrieval quality. This translates to significant cost and time savings in production environments. This also means that, under the constraint of limited token context length, using Claude Context yields better retrieval and answer results.
-
-![MCP Efficiency Analysis](assets/mcp_efficiency_analysis_chart.png)
-
-For detailed evaluation methodology and results, see the [evaluation directory](evaluation/).
-
----
-
-## 🏗️ Architecture
-
-![](assets/Architecture.png)
-
-### 🔧 Implementation Details
-
-- 🔍 **Hybrid Code Search**: Ask questions like *"find functions that handle user authentication"* and get relevant, context-rich code instantly using advanced hybrid search (BM25 + dense vector).
-- 🧠 **Context-Aware**: Discover large codebase, understand how different parts of your codebase relate, even across millions of lines of code.
-- ⚡ **Incremental Indexing**: Efficiently re-index only changed files using Merkle trees.
-- 🧩 **Intelligent Code Chunking**: Analyze code in Abstract Syntax Trees (AST) for chunking.
-- 🗄️ **Scalable**: Integrates with Zilliz Cloud for scalable vector search, no matter how large your codebase is.
-- 🛠️ **Customizable**: Configure file extensions, ignore patterns, and embedding models.
-
-### Core Components
-
-Claude Context is a monorepo containing three main packages:
-
-- **`@zilliz/claude-context-core`**: Core indexing engine with embedding and vector database integration
-- **VSCode Extension**: Semantic Code Search extension for Visual Studio Code
-- **`@zilliz/claude-context-mcp`**: Model Context Protocol server for AI agent integration
-
-### Supported Technologies
-
-- **Embedding Providers**: [OpenAI](https://openai.com), [VoyageAI](https://voyageai.com), [Ollama](https://ollama.ai), [Gemini](https://gemini.google.com)
-- **Vector Databases**: [Milvus](https://milvus.io) or [Zilliz Cloud](https://zilliz.com/cloud)(fully managed vector database as a service)
-- **Code Splitters**: AST-based splitter (with automatic fallback), LangChain character-based splitter
-- **Languages**: TypeScript, JavaScript, Python, Java, C++, C#, Go, Rust, PHP, Ruby, Swift, Kotlin, Scala, Markdown
-- **Development Tools**: VSCode, Model Context Protocol
-
----
-
-## 📦 Other Ways to Use Claude Context
-
-While MCP is the recommended way to use Claude Context with AI assistants, you can also use it directly or through the VSCode extension.
-
-### Build Applications with Core Package
-
-The `@zilliz/claude-context-core` package provides the fundamental functionality for code indexing and semantic search.
-
-```typescript
-import { Context, MilvusVectorDatabase, OpenAIEmbedding } from '@zilliz/claude-context-core';
-
-// Initialize embedding provider
-const embedding = new OpenAIEmbedding({
-    apiKey: process.env.OPENAI_API_KEY || 'your-openai-api-key',
-    model: 'text-embedding-3-small'
-});
-
-// Initialize vector database
-const vectorDatabase = new MilvusVectorDatabase({
-    address: process.env.MILVUS_ADDRESS || 'your-zilliz-cloud-public-endpoint',
-    token: process.env.MILVUS_TOKEN || 'your-zilliz-cloud-api-key'
-});
-
-// Create context instance
-const context = new Context({
-    embedding,
-    vectorDatabase
-});
-
-// Index your codebase with progress tracking
-const stats = await context.indexCodebase('./your-project', (progress) => {
-    console.log(`${progress.phase} - ${progress.percentage}%`);
-});
-console.log(`Indexed ${stats.indexedFiles} files, ${stats.totalChunks} chunks`);
-
-// Perform semantic search
-const results = await context.semanticSearch('./your-project', 'vector database operations', 5);
-results.forEach(result => {
-    console.log(`File: ${result.relativePath}:${result.startLine}-${result.endLine}`);
-    console.log(`Score: ${(result.score * 100).toFixed(2)}%`);
-    console.log(`Content: ${result.content.substring(0, 100)}...`);
-});
-```
-
-### VSCode Extension
-
-Integrates Claude Context directly into your IDE. Provides an intuitive interface for semantic code search and navigation.
-
-1. **Direct Link**: [Install from VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=zilliz.semanticcodesearch)
-2. **Manual Search**:
-    - Open Extensions view in VSCode (Ctrl+Shift+X or Cmd+Shift+X on Mac)
-    - Search for "Semantic Code Search"
-    - Click Install
-
-![img](https://lh7-rt.googleusercontent.com/docsz/AD_4nXdtCtT9Qi6o5mGVoxzX50r8Nb6zDFcjvTQR7WZ-xMbEsHEPPhSYAFVJ7q4-rETzxJ8wy1cyZmU8CmtpNhAU8PGOqVnE2kc2HCn1etDg97Qsh7m89kBjG4ZT7XBgO4Dp7BfFZx7eow?key=qYdFquJrLcfXCUndY-YRBQ)
----
-
-## 🛠️ Development
-
-### Setup Development Environment
-
-#### Prerequisites
-
-- Node.js 20.x or 22.x
-- pnpm (recommended package manager)
-
-#### Cross-Platform Setup
-
-```bash
-# Clone repository
-git clone https://github.com/zilliztech/claude-context.git
-cd claude-context
-
-# Install dependencies
-pnpm install
-
-# Build all packages
-pnpm build
-
-# Start development mode
-pnpm dev
-```
-
-#### Windows-Specific Setup
-
-On Windows, ensure you have:
-
-- **Git for Windows** with proper line ending configuration
-- **Node.js** installed via the official installer or package manager
-- **pnpm** installed globally: `npm install -g pnpm`
-
-```powershell
-# Windows PowerShell/Command Prompt
-git clone https://github.com/zilliztech/claude-context.git
-cd claude-context
-
-# Configure git line endings (recommended)
-git config core.autocrlf false
-
-# Install dependencies
-pnpm install
-
-# Build all packages (uses cross-platform scripts)
-pnpm build
-
-# Start development mode
-pnpm dev
-```
-
-### Building
-
-```bash
-# Build all packages (cross-platform)
-pnpm build
-
-# Build specific package
-pnpm build:core
-pnpm build:vscode
-pnpm build:mcp
-
-# Performance benchmarking
-pnpm benchmark
-```
-
-#### Windows Build Notes
-
-- All build scripts are cross-platform compatible using rimraf
-- Build caching is enabled for faster subsequent builds
-- Use PowerShell or Command Prompt - both work equally well
-
-### Running Examples
-
-```bash
-# Development with file watching
-cd examples/basic-usage
-pnpm dev
-```
-
----
-
-## 📖 Examples
-
-Check the `/examples` directory for complete usage examples:
-
-- **Basic Usage**: Simple indexing and search example
-
----
-
-## ❓ FAQ
-
-**Common Questions:**
-
-- **[What files does Claude Context decide to embed?](docs/troubleshooting/faq.md#q-what-files-does-claude-context-decide-to-embed)**
-- **[Can I use a fully local deployment setup?](docs/troubleshooting/faq.md#q-can-i-use-a-fully-local-deployment-setup)**
-- **[Does it support multiple projects / codebases?](docs/troubleshooting/faq.md#q-does-it-support-multiple-projects--codebases)**
-- **[How does Claude Context compare to other coding tools?](docs/troubleshooting/faq.md#q-how-does-claude-context-compare-to-other-coding-tools-like-serena-context7-or-deepwiki)**
-
-❓ For detailed answers and more troubleshooting tips, see our [FAQ Guide](docs/troubleshooting/faq.md).
-
-🔧 **Encountering issues?** Visit our [Troubleshooting Guide](docs/troubleshooting/troubleshooting-guide.md) for step-by-step solutions.
-
-📚 **Need more help?** Check out our [complete documentation](docs/) for detailed guides and troubleshooting tips.
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details on how to get started.
-
-**Package-specific contributing guides:**
-
-- [Core Package Contributing](packages/core/CONTRIBUTING.md)
-- [MCP Server Contributing](packages/mcp/CONTRIBUTING.md)  
-- [VSCode Extension Contributing](packages/vscode-extension/CONTRIBUTING.md)
-
----
-
-## 🗺️ Roadmap
-
-- [x] AST-based code analysis for improved understanding
-- [x] Support for additional embedding providers
-- [ ] Agent-based interactive search mode
-- [x] Enhanced code chunking strategies
-- [ ] Search result ranking optimization
-- [ ] Robust Chrome Extension
-
----
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 🔗 Links
-
-- [GitHub Repository](https://github.com/zilliztech/claude-context)
-- [VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=zilliz.semanticcodesearch)
-- [Milvus Documentation](https://milvus.io/docs)
-- [Zilliz Cloud](https://zilliz.com/cloud)
+MIT — See [LICENSE](LICENSE) for details.
