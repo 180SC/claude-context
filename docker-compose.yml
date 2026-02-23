@@ -1,7 +1,15 @@
 services:
   # MCP Server - HTTP Transport Mode
-  # Uses Zilliz Cloud by default (from .env), or local Milvus if using 'local' profile
+  # Provides Streamable HTTP transport on /mcp for remote MCP clients.
+  # Uses Zilliz Cloud for vector storage (from .env).
+  #
+  # Usage:
+  #   docker compose up --build        # Build and start
+  #   docker compose up -d             # Start in background
+  #   docker compose logs -f           # Watch logs
+  #   curl http://localhost:3100/health # Verify running
   mcp-server:
+    container_name: claude-context-mcp
     build:
       context: .
       dockerfile: packages/mcp/Dockerfile
@@ -9,9 +17,14 @@ services:
       - "${MCP_PORT:-3100}:3100"
     env_file:
       - .env
+    environment:
+      # Ensure HTTP transport mode
+      - NODE_ENV=production
     command: ["--transport", "http", "--port", "3100"]
     volumes:
       - mcp-data:/data
+      # Mount host code directories for indexing (add your repos here):
+      # - /home/you/projects:/repos/projects:ro
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3100/health"]
       interval: 30s

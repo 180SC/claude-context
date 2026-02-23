@@ -96,11 +96,12 @@ export class ContextMcpServer {
             { name: 'Context MCP Server', version: this.version },
             { capabilities: { tools: {} } }
         );
-        this.setupTools(server);
+        this.setupTools(server, 'http');
         return server;
     }
 
-    private setupTools(server: Server) {
+    private setupTools(server: Server, transportMode: 'stdio' | 'http' | 'both' = 'stdio') {
+        const isHttpOnly = transportMode === 'http';
         const index_description = `
 Index a codebase directory to enable semantic search using a configurable code splitter.
 
@@ -134,10 +135,11 @@ This tool is versatile and can be used before completing various tasks to retrie
 - You can then use the index_codebase tool to index the codebase before searching again.
 `;
 
+        const READ_ONLY_TOOLS = ['search_code', 'search_all', 'get_indexing_status'];
+
         // Define available tools
         server.setRequestHandler(ListToolsRequestSchema, async () => {
-            return {
-                tools: [
+            const allTools = [
                     {
                         name: "index_codebase",
                         description: index_description,
@@ -292,13 +294,25 @@ This tool is versatile and can be used before completing various tasks to retrie
                             required: ["query"]
                         }
                     },
-                ]
+                ];
+            return {
+                tools: isHttpOnly
+                    ? allTools.filter(t => READ_ONLY_TOOLS.includes(t.name))
+                    : allTools
             };
         });
 
         // Handle tool execution
         server.setRequestHandler(CallToolRequestSchema, async (request) => {
             const { name, arguments: args } = request.params;
+
+            // Block write tools over HTTP transport
+            if (isHttpOnly && !READ_ONLY_TOOLS.includes(name)) {
+                return {
+                    content: [{ type: "text" as const, text: `Tool "${name}" is not available over HTTP transport. Use stdio mode for indexing and clearing operations.` }],
+                    isError: true,
+                };
+            }
 
             switch (name) {
                 case "index_codebase":
