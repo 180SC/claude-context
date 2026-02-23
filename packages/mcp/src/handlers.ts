@@ -937,8 +937,15 @@ export class ToolHandlers {
             if (cloudCollectionMap.size > 0) {
                 const existingCollections = new Set(collectionsToSearch.map(c => c.collectionName));
                 const coveredCanonicalIds = new Set(collectionsToSearch.map(c => c.repoCanonicalId));
+                const coveredRepoNames = new Set(collectionsToSearch.map(c => c.repoName.toLowerCase()));
                 let cloudAdded = 0;
                 let cloudDeduped = 0;
+
+                // Generic worktree/branch folder names that should be replaced with parent dir
+                const GENERIC_DIR_NAMES = new Set([
+                    'feature', 'master', 'main', 'develop', 'dev', 'staging',
+                    'production', 'hotfix', 'release', 'bugfix', 'by-feature',
+                ]);
 
                 for (const [collectionName, codebasePath] of cloudCollectionMap) {
                     if (existingCollections.has(collectionName)) continue;
@@ -963,6 +970,24 @@ export class ToolHandlers {
                         // Identity resolution failed — keep fallback values
                     }
 
+                    // If repoName is still a generic worktree/branch folder name,
+                    // use parent directory which typically holds the project name
+                    // e.g. /home/user/Working/stream-ops/feature → "stream-ops"
+                    if (GENERIC_DIR_NAMES.has(repoName.toLowerCase()) || /^feature-\d+$/.test(repoName)) {
+                        const parentName = path.basename(path.dirname(codebasePath));
+                        if (parentName && parentName !== '.' && parentName !== '') {
+                            repoName = parentName;
+                        }
+                    }
+
+                    // Deduplicate by resolved repoName (catches worktrees where identity failed
+                    // but parent-dir heuristic resolved to the same project name)
+                    if (coveredRepoNames.has(repoName.toLowerCase())) {
+                        console.log(`[SEARCH-ALL] Skipping cloud collection '${collectionName}' — repo '${repoName}' already covered`);
+                        cloudDeduped++;
+                        continue;
+                    }
+
                     // Apply repo filter if provided
                     if (repoFilter) {
                         const repoNameLower = repoName.toLowerCase();
@@ -974,6 +999,7 @@ export class ToolHandlers {
                     }
 
                     coveredCanonicalIds.add(repoCanonicalId);
+                    coveredRepoNames.add(repoName.toLowerCase());
                     collectionsToSearch.push({
                         collectionName,
                         repoName,
