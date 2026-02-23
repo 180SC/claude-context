@@ -27,6 +27,9 @@ FROM node:22-alpine AS production
 
 WORKDIR /app
 
+# Install git (needed for repo identity resolution, worktree detection, branch info)
+RUN apk add --no-cache git
+
 # Install pnpm
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
