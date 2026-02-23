@@ -249,6 +249,45 @@ CUSTOM_IGNORE_PATTERNS=temp/**,*.backup,private/**,uploads/**
 
 For file inclusion and exclusion rules, see the [File Inclusion & Exclusion Guide](docs/dive-deep/file-inclusion-rules.md).
 
+## Docker / HTTP Transport
+
+The server can run as a Docker container in HTTP mode, useful for giving remote agents (Agno, LibreChat, other LLMs) access to `search_all` over the network. Index your repos locally via stdio, then deploy the container as a search-only endpoint — no code volumes needed since all search data lives in Zilliz Cloud.
+
+```bash
+# 1. Copy and fill in your .env
+cp .env.example .env
+# Set OPENAI_API_KEY, MILVUS_ADDRESS, MILVUS_TOKEN, MCP_AUTH_TOKEN
+
+# 2. Build and run
+docker compose up --build
+
+# 3. Verify
+curl http://localhost:3100/health
+```
+
+The container exposes a Streamable HTTP endpoint on `/mcp` with bearer token auth and rate limiting. Connect from any MCP-compatible client:
+
+```json
+{
+  "mcpServers": {
+    "claude-context-remote": {
+      "url": "http://localhost:3100/mcp",
+      "headers": {
+        "Authorization": "Bearer <your-MCP_AUTH_TOKEN>"
+      }
+    }
+  }
+}
+```
+
+| Env var | Description | Default |
+|---------|-------------|---------|
+| `MCP_AUTH_TOKEN` | Bearer token for authentication (required) | — |
+| `MCP_PORT` | HTTP server port | `3100` |
+| `MCP_RATE_LIMIT` | Max requests per minute per client IP | `60` |
+
+See `.env.example` for the full list of environment variables.
+
 ## Troubleshooting
 
 | Problem | Fix |
